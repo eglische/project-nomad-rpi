@@ -35,8 +35,8 @@ LABEL org.opencontainers.image.title="Project N.O.M.A.D" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.vendor="Crosstalk Solutions, LLC" \
-      org.opencontainers.image.documentation="https://github.com/CrosstalkSolutions/project-nomad/blob/main/README.md" \
-      org.opencontainers.image.source="https://github.com/CrosstalkSolutions/project-nomad" \
+      org.opencontainers.image.documentation="https://github.com/eglische/project-nomad-rpi/blob/main/README.md" \
+      org.opencontainers.image.source="https://github.com/eglische/project-nomad-rpi" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 ENV NODE_ENV=production

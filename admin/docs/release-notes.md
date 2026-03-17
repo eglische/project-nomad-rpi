@@ -537,9 +537,9 @@
 ## Support
 
 - **Discord:** [Join the Community](https://discord.com/invite/crosstalksolutions) — Get help, share your builds, and connect with other NOMAD users
-- **Bug Reports:** [GitHub Issues](https://github.com/Crosstalk-Solutions/project-nomad/issues)
+- **Bug Reports:** [GitHub Issues](https://github.com/eglische/project-nomad-rpi/issues)
 - **Website:** [www.projectnomad.us](https://www.projectnomad.us)
 
 ---
 
-*For the full changelog, see our [GitHub releases](https://github.com/Crosstalk-Solutions/project-nomad/releases).*
+*For the full changelog, see our [GitHub releases](https://github.com/eglische/project-nomad-rpi/releases).*
