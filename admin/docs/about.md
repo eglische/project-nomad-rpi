@@ -6,12 +6,12 @@ While many similar offline survival computers are designed to be run on bare-min
 
 Since its initial release, NOMAD has grown to include built-in AI chat with a Knowledge Base for document-aware responses, a System Benchmark with a community leaderboard, curated content collections with tiered options, and an Easy Setup Wizard to get new users up and running quickly.
 
-Project N.O.M.A.D. is open source, released under the [Apache License 2.0](https://github.com/Crosstalk-Solutions/project-nomad/blob/main/LICENSE).
+Project N.O.M.A.D. RPi is open source, released under the [Apache License 2.0](https://github.com/eglische/project-nomad-rpi/blob/main/LICENSE).
 
 ## Links
 
 - **Website:** [www.projectnomad.us](https://www.projectnomad.us)
 - **Hardware Guide:** [www.projectnomad.us/hardware](https://www.projectnomad.us/hardware)
 - **Discord:** [Join the Community](https://discord.com/invite/crosstalksolutions)
-- **GitHub:** [Crosstalk-Solutions/project-nomad](https://github.com/Crosstalk-Solutions/project-nomad)
+- **GitHub:** [eglische/project-nomad-rpi](https://github.com/eglische/project-nomad-rpi)
 - **Benchmark Leaderboard:** [benchmark.projectnomad.us](https://benchmark.projectnomad.us)

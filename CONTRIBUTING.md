@@ -22,7 +22,7 @@ Thank you for your interest in contributing to Project N.O.M.A.D.! Community con
 
 ## Code of Conduct
 
-Please read and review our full [Code of Conduct](https://github.com/Crosstalk-Solutions/project-nomad/blob/main/CODE_OF_CONDUCT.md) before contributing. In short: please be respectful and considerate in all interactions with maintainers and other contributors.
+Please read and review our full [Code of Conduct](https://github.com/eglische/project-nomad-rpi/blob/main/CODE_OF_CONDUCT.md) before contributing. In short: please be respectful and considerate in all interactions with maintainers and other contributors.
 
 We are committed to providing a welcoming environment for everyone. Disrespectful or abusive behavior will not be tolerated. 
 
@@ -41,7 +41,7 @@ When opening an issue:
 ---
 
 ## Getting Started with Contributing
-**Please note**: this is the Getting Started guide for developing and contributing to Nomad, NOT [installing Nomad](https://github.com/Crosstalk-Solutions/project-nomad/blob/main/README.md) for regular use! 
+**Please note**: this is the Getting Started guide for developing and contributing to Nomad, NOT [installing Nomad](https://github.com/eglische/project-nomad-rpi/blob/main/README.md) for regular use! 
 
 ### Prerequisites
 
@@ -56,12 +56,12 @@ When opening an issue:
 1. Click **Fork** at the top right of this repository
 2. Clone your fork locally:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/project-nomad.git
-   cd project-nomad
+   git clone https://github.com/YOUR_USERNAME/project-nomad-rpi.git
+   cd project-nomad-rpi
    ```
 3. Add the upstream remote so you can stay in sync:
    ```bash
-   git remote add upstream https://github.com/Crosstalk-Solutions/project-nomad.git
+   git remote add upstream https://github.com/eglische/project-nomad-rpi.git
    ```
 
 ### Avoid Installing a Release Version Locally
