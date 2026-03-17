@@ -38,6 +38,7 @@ GITHUB_REPO_OWNER="${GITHUB_REPO_OWNER:-eglische}"
 GITHUB_REPO_NAME="${GITHUB_REPO_NAME:-project-nomad-rpi}"
 GITHUB_REPO_BRANCH="${GITHUB_REPO_BRANCH:-main}"
 GITHUB_RAW_BASE_URL="https://raw.githubusercontent.com/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/refs/heads/${GITHUB_REPO_BRANCH}"
+GITHUB_ARCHIVE_URL="https://codeload.github.com/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/tar.gz/refs/heads/${GITHUB_REPO_BRANCH}"
 MANAGEMENT_COMPOSE_FILE_URL="${GITHUB_RAW_BASE_URL}/install/management_compose.yaml"
 ENTRYPOINT_SCRIPT_URL="${GITHUB_RAW_BASE_URL}/install/entrypoint.sh"
 SIDECAR_UPDATER_DOCKERFILE_URL="${GITHUB_RAW_BASE_URL}/install/sidecar-updater/Dockerfile"
@@ -51,6 +52,7 @@ INSTALL_LOG_DIR="${HOME}/project-nomad-install-logs"
 INSTALL_LOG_FILE="${INSTALL_LOG_DIR}/install-${INSTALL_TIMESTAMP}.log"
 warnings_detected=0
 preflight_failures=0
+boot_order_update_applied='false'
 
 script_option_debug='true'
 accepted_terms='false'
@@ -67,6 +69,7 @@ external_device=''
 external_mount="${NOMAD_EXTERNAL_MOUNT_DEFAULT}"
 external_label="${NOMAD_EXTERNAL_LABEL_DEFAULT}"
 nomad_data_root=''
+source_repo_dir=''
 
 ###################################################################################################################################################################################################
 #                                                                                                                                                                                                 #
@@ -258,10 +261,13 @@ check_is_debug_mode(){
 generateRandomPass() {
   local length="${1:-32}"  # Default to 32
   local password
-  
-  # Generate random password using /dev/urandom
-  password=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$length")
-  
+
+  # Temporarily disable pipefail so head terminating the upstream tr process
+  # doesn't turn password generation into a false error.
+  set +o pipefail
+  password="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$length")"
+  set -o pipefail
+
   echo "$password"
 }
 
@@ -369,8 +375,216 @@ docker_runtime_is_configured() {
   sudo docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"nvidia"'
 }
 
+get_parent_block_device() {
+  local device_path="$1"
+  local parent_name=''
+  parent_name="$(lsblk -no PKNAME "${device_path}" 2>/dev/null | head -n1)"
+  if [[ -n "${parent_name}" ]]; then
+    echo "/dev/${parent_name}"
+  fi
+}
+
+get_root_block_device() {
+  local root_source=''
+  root_source="$(findmnt -no SOURCE / 2>/dev/null || true)"
+  if [[ "${root_source}" == /dev/* ]]; then
+    local root_parent=''
+    root_parent="$(get_parent_block_device "${root_source}")"
+    echo "${root_parent:-${root_source}}"
+  fi
+}
+
+device_is_system_disk() {
+  local device_path="$1"
+  local root_device=''
+  local candidate_parent=''
+  root_device="$(get_root_block_device)"
+  candidate_parent="$(get_parent_block_device "${device_path}")"
+  [[ -n "${root_device}" && "${root_device}" == "${candidate_parent:-${device_path}}" ]]
+}
+
+device_mountpoint() {
+  local device_path="$1"
+  findmnt -nr -S "${device_path}" -o TARGET 2>/dev/null | head -n1
+}
+
+device_hosts_active_swap() {
+  local device_path="$1"
+  local mountpoint=''
+  mountpoint="$(device_mountpoint "${device_path}")"
+
+  while read -r swap_name; do
+    [[ -z "${swap_name}" ]] && continue
+    if [[ "${swap_name}" == "${device_path}" ]]; then
+      return 0
+    fi
+    if [[ -n "${mountpoint}" && "${swap_name}" == "${mountpoint}/"* ]]; then
+      return 0
+    fi
+  done < <(swapon --noheadings --raw --show=NAME 2>/dev/null || true)
+
+  return 1
+}
+
+safe_sd_boot_order_value() {
+  if [[ "${target_platform}" == 'raspberry-pi' ]] && grep -qi "Raspberry Pi 5" /proc/device-tree/model 2>/dev/null; then
+    echo "0xf461"
+  else
+    echo "0xf41"
+  fi
+}
+
+current_boot_order_value() {
+  sudo rpi-eeprom-config 2>/dev/null | awk -F= '/^BOOT_ORDER=/{print $2; exit}'
+}
+
+apply_safe_boot_order() {
+  local desired_boot_order=''
+  desired_boot_order="$(safe_sd_boot_order_value)"
+  local temp_file=''
+  temp_file="$(mktemp)"
+
+  if ! sudo sh -c "rpi-eeprom-config > '${temp_file}'" >/dev/null 2>&1; then
+    rm -f "${temp_file}"
+    echo -e "${YELLOW}#${RESET} Warning: unable to read current Raspberry Pi EEPROM configuration."
+    return 1
+  fi
+
+  if grep -q '^BOOT_ORDER=' "${temp_file}"; then
+    sed -i "s/^BOOT_ORDER=.*/BOOT_ORDER=${desired_boot_order}/" "${temp_file}"
+  else
+    printf "\n[all]\nBOOT_ORDER=%s\n" "${desired_boot_order}" >> "${temp_file}"
+  fi
+
+  if ! sudo rpi-eeprom-update -d -f "${temp_file}" >/dev/null 2>&1; then
+    rm -f "${temp_file}"
+    echo -e "${YELLOW}#${RESET} Warning: failed to stage Raspberry Pi bootloader EEPROM update."
+    return 1
+  fi
+
+  rm -f "${temp_file}"
+  boot_order_update_applied='true'
+  echo -e "${GREEN}#${RESET} Raspberry Pi bootloader update staged with BOOT_ORDER=${WHITE_R}${desired_boot_order}${RESET}."
+  echo -e "${YELLOW}#${RESET} Reboot is required before the new boot order takes effect.\\n"
+  return 0
+}
+
+ensure_safe_boot_order() {
+  if [[ "${target_platform}" != 'raspberry-pi' ]]; then
+    return 0
+  fi
+
+  if ! command -v rpi-eeprom-config >/dev/null 2>&1 || ! command -v rpi-eeprom-update >/dev/null 2>&1; then
+    record_warning "Raspberry Pi EEPROM tools are unavailable. Boot-order safety was not checked."
+    return 0
+  fi
+
+  local desired_boot_order=''
+  local current_boot_order=''
+  desired_boot_order="$(safe_sd_boot_order_value)"
+  current_boot_order="$(current_boot_order_value || true)"
+
+  if [[ -z "${current_boot_order}" ]]; then
+    record_warning "Could not determine current Raspberry Pi boot order."
+    return 0
+  fi
+
+  if [[ "${current_boot_order}" == "${desired_boot_order}" ]]; then
+    echo -e "${GREEN}#${RESET} Raspberry Pi boot order already prefers SD before USB/NVMe: ${WHITE_R}${current_boot_order}${RESET}.\\n"
+    return 0
+  fi
+
+  echo -e "${YELLOW}#${RESET} Current Raspberry Pi boot order is ${WHITE_R}${current_boot_order}${RESET}; recommended safe order is ${WHITE_R}${desired_boot_order}${RESET}."
+  if confirm_action "Stage a bootloader update so the Pi prefers SD boot before USB/NVMe?"; then
+    apply_safe_boot_order || true
+  else
+    record_warning "Skipped Raspberry Pi boot-order update. USB-attached boot media may still interfere with startup."
+  fi
+}
+
 refresh_nomad_data_root() {
   nomad_data_root="${external_mount}/project-nomad"
+}
+
+source_install_enabled() {
+  [[ -n "${source_repo_dir}" ]]
+}
+
+copy_or_download_file() {
+  local source_path="$1"
+  local url="$2"
+  local destination_path="$3"
+  local description="$4"
+
+  if source_install_enabled && [[ -n "${source_path}" ]]; then
+    if [[ ! -f "${source_path}" ]]; then
+      echo -e "${RED}#${RESET} Expected local source file for ${description} was not found: ${WHITE_R}${source_path}${RESET}"
+      exit 1
+    fi
+
+    if ! cp "${source_path}" "${destination_path}"; then
+      echo -e "${RED}#${RESET} Failed to copy ${description} from local source checkout."
+      exit 1
+    fi
+
+    return 0
+  fi
+
+  if ! curl -fsSL "${url}" -o "${destination_path}"; then
+    echo -e "${RED}#${RESET} Failed to download ${description}. Please check the URL and try again."
+    exit 1
+  fi
+}
+
+prepare_local_build_source_checkout() {
+  if source_install_enabled; then
+    return 0
+  fi
+
+  if [[ "${target_architecture}" != 'arm64' && "${target_architecture}" != 'aarch64' ]]; then
+    return 0
+  fi
+
+  local source_root="${NOMAD_DIR}/source"
+  local extracted_root="${source_root}/${GITHUB_REPO_NAME}-${GITHUB_REPO_BRANCH}"
+
+  echo -e "${YELLOW}#${RESET} Preparing local source checkout for arm64 image builds...\\n"
+  sudo mkdir -p "${source_root}"
+  sudo chown -R "$(whoami):$(whoami)" "${source_root}"
+
+  rm -rf "${source_root:?}/"*
+  mkdir -p "${source_root}"
+  if ! curl -fsSL "${GITHUB_ARCHIVE_URL}" | tar -xzf - -C "${source_root}"; then
+    echo -e "${RED}#${RESET} Failed to extract source archive for local arm64 builds."
+    exit 1
+  fi
+
+  if [[ -d "${extracted_root}" ]]; then
+    source_repo_dir="${extracted_root}"
+  else
+    source_repo_dir="$(find "${source_root}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+  fi
+
+  if [[ -z "${source_repo_dir}" || ! -d "${source_repo_dir}" ]]; then
+    echo -e "${RED}#${RESET} Unable to locate extracted source checkout under ${WHITE_R}${source_root}${RESET}."
+    exit 1
+  fi
+
+  echo -e "${GREEN}#${RESET} Local source checkout prepared at ${WHITE_R}${source_repo_dir}${RESET}.\\n"
+}
+
+write_install_metadata() {
+  local metadata_path="${NOMAD_DIR}/install-metadata.env"
+  cat > "${metadata_path}" <<EOF
+GITHUB_REPO_OWNER='${GITHUB_REPO_OWNER}'
+GITHUB_REPO_NAME='${GITHUB_REPO_NAME}'
+GITHUB_REPO_BRANCH='${GITHUB_REPO_BRANCH}'
+SOURCE_REPO_DIR='${source_repo_dir}'
+TARGET_PLATFORM='${target_platform}'
+TARGET_ARCHITECTURE='${target_architecture}'
+EXTERNAL_MOUNT='${external_mount}'
+EOF
+  chmod 600 "${metadata_path}"
 }
 
 confirm_action() {
@@ -395,15 +609,19 @@ confirm_action() {
 select_external_device_interactively() {
   local candidates=()
   local candidate_output=''
+  local root_device=''
+  root_device="$(get_root_block_device)"
 
-  candidate_output="$(lsblk -rno NAME,TYPE,FSTYPE,LABEL,MOUNTPOINT,RM,MODEL,TRAN,SIZE | awk '
-    $2 == "part" && $1 !~ /^mmcblk/ {
-      printf "/dev/%s|%s|%s|%s|%s|%s|%s\n", $1, $3, $4, $5, $6, $7, $8
-    }'
-  )"
+  candidate_output="$(lsblk -rno PATH,TYPE,FSTYPE,LABEL,MOUNTPOINT,SIZE | awk '$2 == "part" { printf "%s|%s|%s|%s|%s\n", $1, $3, $4, $5, $6 }')"
 
   while IFS= read -r line; do
-    [[ -n "${line}" ]] && candidates+=("${line}")
+    [[ -z "${line}" ]] && continue
+    local candidate_device=''
+    candidate_device="$(echo "${line}" | cut -d'|' -f1)"
+    if device_is_system_disk "${candidate_device}"; then
+      continue
+    fi
+    candidates+=("${line}")
   done <<< "${candidate_output}"
 
   if [[ ${#candidates[@]} -eq 0 ]]; then
@@ -416,10 +634,27 @@ select_external_device_interactively() {
   local index=1
   local entry=''
   for entry in "${candidates[@]}"; do
-    IFS='|' read -r dev fstype label mountpoint rm model tran size <<< "${entry}"
-    echo "  ${index}) ${dev} size=${size} fstype=${fstype:-<none>} label=${label:-<none>} mount=${mountpoint:-<none>} model=${model:-<unknown>} transport=${tran:-<unknown>}"
+    IFS='|' read -r dev fstype label mountpoint size <<< "${entry}"
+    local notes=()
+    if device_hosts_active_swap "${dev}"; then
+      notes+=("active-swap")
+    fi
+    if [[ -n "${mountpoint}" ]]; then
+      notes+=("mounted")
+    fi
+    printf "  %s) %s size=%s fstype=%s label=%s mount=%s" \
+      "${index}" "${dev}" "${size:-<unknown>}" "${fstype:-<none>}" "${label:-<none>}" "${mountpoint:-<none>}"
+    if [[ ${#notes[@]} -gt 0 ]]; then
+      printf " notes=%s" "$(IFS=,; echo "${notes[*]}")"
+    fi
+    printf "\n"
     index=$((index + 1))
   done
+
+  if [[ -n "${root_device}" ]]; then
+    echo -e "${YELLOW}#${RESET} System boot/root device detected as ${WHITE_R}${root_device}${RESET}. It is excluded from selection."
+  fi
+  echo -e "${YELLOW}#${RESET} Partitions with active swap should not be selected."
 
   local selection=''
   while true; do
@@ -446,24 +681,41 @@ configure_external_storage() {
     exit 1
   fi
 
-  if [[ "${external_device}" =~ ^/dev/mmcblk ]]; then
-    echo -e "${RED}#${RESET} Refusing to use ${WHITE_R}${external_device}${RESET} because it appears to be the system SD card."
+  if device_is_system_disk "${external_device}"; then
+    echo -e "${RED}#${RESET} Refusing to use ${WHITE_R}${external_device}${RESET} because it is on the current system boot/root device."
     exit 1
   fi
 
-  if [[ "${format_external_disk}" != 'true' ]]; then
-    if confirm_action "Format ${external_device} as ext4 and mount it at ${external_mount}? Existing data on that partition will be lost"; then
-      format_external_disk='true'
-    else
-      echo -e "${RED}#${RESET} External storage formatting is required for the managed data path."
+  if device_hosts_active_swap "${external_device}"; then
+    echo -e "${RED}#${RESET} Refusing to use ${WHITE_R}${external_device}${RESET} because it currently hosts active swap."
+    echo -e "${YELLOW}#${RESET} Keep swap on its own device/path and choose a different partition for Nomad data."
+    exit 1
+  fi
+
+  ensure_safe_boot_order
+
+  local current_fstype=''
+  current_fstype="$(sudo blkid -s TYPE -o value "${external_device}" 2>/dev/null || true)"
+
+  if [[ "${format_external_disk}" == 'true' ]]; then
+    if ! confirm_action "Format ${external_device} as ext4 and mount it at ${external_mount}? Existing data on that partition will be lost"; then
+      echo -e "${RED}#${RESET} External storage formatting was cancelled."
       exit 1
     fi
+  elif [[ "${current_fstype}" != 'ext4' ]]; then
+    echo -e "${RED}#${RESET} External device ${WHITE_R}${external_device}${RESET} is not ext4 (detected: ${WHITE_R}${current_fstype:-unknown}${RESET})."
+    echo -e "${YELLOW}#${RESET} Re-run with ${WHITE_R}--format-external-disk${RESET} if you want the installer to prepare that partition."
+    exit 1
+  else
+    echo -e "${YELLOW}#${RESET} Reusing existing ext4 filesystem on ${WHITE_R}${external_device}${RESET} without formatting."
   fi
 
   echo -e "${YELLOW}#${RESET} Preparing external storage device ${WHITE_R}${external_device}${RESET} for Project N.O.M.A.D data...\\n"
 
-  if ! sudo umount "${external_device}" 2>/dev/null; then
-    true
+  local existing_mountpoint=''
+  existing_mountpoint="$(device_mountpoint "${external_device}")"
+  if [[ -n "${existing_mountpoint}" ]]; then
+    sudo umount "${external_device}" 2>/dev/null || true
   fi
 
   if [[ "${format_external_disk}" == 'true' ]]; then
@@ -488,9 +740,12 @@ configure_external_storage() {
 
   sudo mount "${external_mount}"
   refresh_nomad_data_root
-  sudo mkdir -p "${nomad_data_root}/storage" "${nomad_data_root}/mysql" "${nomad_data_root}/redis"
+  sudo mkdir -p "${nomad_data_root}/storage/logs" "${nomad_data_root}/mysql" "${nomad_data_root}/redis"
+  sudo touch "${nomad_data_root}/storage/logs/admin.log"
   sudo chown -R "$(whoami):$(whoami)" "${nomad_data_root}"
 
+  echo -e "${YELLOW}#${RESET} Installer note: Project N.O.M.A.D stores data on ${WHITE_R}${external_device}${RESET} but does not configure USB boot."
+  echo -e "${YELLOW}#${RESET} If your Pi firmware ever prefers USB mass storage over the SD card, set Raspberry Pi boot order to prefer SD before USB."
   echo -e "${GREEN}#${RESET} External storage mounted at ${WHITE_R}${external_mount}${RESET} with data root ${WHITE_R}${nomad_data_root}${RESET}.\\n"
 }
 
@@ -788,6 +1043,11 @@ run_platform_runtime_preinstall() {
 }
 
 get_install_confirmation(){
+  if [[ "${assume_yes}" == 'true' ]]; then
+    echo -e "${YELLOW}#${RESET} Auto-confirm enabled: proceeding with Project N.O.M.A.D installation."
+    return 0
+  fi
+
   read -p "This script will install/update Project N.O.M.A.D. and its dependencies on your machine. Are you sure you want to continue? (y/N): " choice
   case "$choice" in
     y|Y )
@@ -801,6 +1061,12 @@ get_install_confirmation(){
 }
 
 accept_terms() {
+  if [[ "${assume_yes}" == 'true' ]]; then
+    accepted_terms='true'
+    echo -e "${YELLOW}#${RESET} Auto-confirm enabled: accepting License Agreement & Terms of Use."
+    return 0
+  fi
+
   printf "\n\n"
   echo "License Agreement & Terms of Use"
   echo "__________________________"
@@ -845,10 +1111,13 @@ download_management_compose_file() {
   refresh_nomad_data_root
 
   echo -e "${YELLOW}#${RESET} Downloading docker-compose file for management...\\n"
-  if ! curl -fsSL "$MANAGEMENT_COMPOSE_FILE_URL" -o "$compose_file_path"; then
-    echo -e "${RED}#${RESET} Failed to download the docker compose file. Please check the URL and try again."
-    exit 1
+  local compose_source_path=''
+  local compose_url="${MANAGEMENT_COMPOSE_FILE_URL}"
+  if source_install_enabled; then
+    compose_source_path="${source_repo_dir}/install/management_compose.local-build.yaml"
+    compose_url=''
   fi
+  copy_or_download_file "${compose_source_path}" "${compose_url}" "${compose_file_path}" "the docker compose file"
   echo -e "${GREEN}#${RESET} Docker compose file downloaded successfully to $compose_file_path.\\n"
 
   local app_key=$(generateRandomPass)
@@ -866,6 +1135,12 @@ download_management_compose_file() {
   sed -i "s|/opt/project-nomad/storage|${nomad_data_root}/storage|g" "$compose_file_path"
   sed -i "s|/opt/project-nomad/mysql|${nomad_data_root}/mysql|g" "$compose_file_path"
   sed -i "s|/opt/project-nomad/redis|${nomad_data_root}/redis|g" "$compose_file_path"
+  sed -i "s|__NOMAD_SOURCE_DIR__|${source_repo_dir}|g" "$compose_file_path"
+
+  if grep -q 'replaceme' "$compose_file_path"; then
+    echo -e "${RED}#${RESET} Compose templating left unresolved placeholder values in ${WHITE_R}${compose_file_path}${RESET}."
+    exit 1
+  fi
   
   echo -e "${GREEN}#${RESET} Docker compose file configured successfully.\\n"
 }
@@ -874,10 +1149,7 @@ download_wait_for_it_script() {
   local wait_for_it_script_path="${NOMAD_DIR}/wait-for-it.sh"
 
   echo -e "${YELLOW}#${RESET} Downloading wait-for-it script...\\n"
-  if ! curl -fsSL "$WAIT_FOR_IT_SCRIPT_URL" -o "$wait_for_it_script_path"; then
-    echo -e "${RED}#${RESET} Failed to download the wait-for-it script. Please check the URL and try again."
-    exit 1
-  fi
+  copy_or_download_file '' "$WAIT_FOR_IT_SCRIPT_URL" "$wait_for_it_script_path" "the wait-for-it script"
   chmod +x "$wait_for_it_script_path"
   echo -e "${GREEN}#${RESET} wait-for-it script downloaded successfully to $wait_for_it_script_path.\\n"
 }
@@ -886,10 +1158,13 @@ download_entrypoint_script() {
   local entrypoint_script_path="${NOMAD_DIR}/entrypoint.sh"
 
   echo -e "${YELLOW}#${RESET} Downloading entrypoint script...\\n"
-  if ! curl -fsSL "$ENTRYPOINT_SCRIPT_URL" -o "$entrypoint_script_path"; then
-    echo -e "${RED}#${RESET} Failed to download the entrypoint script. Please check the URL and try again."
-    exit 1
+  local entrypoint_source_path=''
+  local entrypoint_url="${ENTRYPOINT_SCRIPT_URL}"
+  if source_install_enabled; then
+    entrypoint_source_path="${source_repo_dir}/install/entrypoint.sh"
+    entrypoint_url=''
   fi
+  copy_or_download_file "${entrypoint_source_path}" "${entrypoint_url}" "${entrypoint_script_path}" "the entrypoint script"
   chmod +x "$entrypoint_script_path"
   echo -e "${GREEN}#${RESET} entrypoint script downloaded successfully to $entrypoint_script_path.\\n"
 }
@@ -903,19 +1178,24 @@ download_sidecar_files() {
 
   local sidecar_dockerfile_path="${NOMAD_DIR}/sidecar-updater/Dockerfile"
   local sidecar_script_path="${NOMAD_DIR}/sidecar-updater/update-watcher.sh"
+  local sidecar_dockerfile_source_path=''
+  local sidecar_script_source_path=''
+  local sidecar_dockerfile_url="${SIDECAR_UPDATER_DOCKERFILE_URL}"
+  local sidecar_script_url="${SIDECAR_UPDATER_SCRIPT_URL}"
+
+  if source_install_enabled; then
+    sidecar_dockerfile_source_path="${source_repo_dir}/install/sidecar-updater/Dockerfile"
+    sidecar_script_source_path="${source_repo_dir}/install/sidecar-updater/update-watcher.sh"
+    sidecar_dockerfile_url=''
+    sidecar_script_url=''
+  fi
 
   echo -e "${YELLOW}#${RESET} Downloading sidecar updater Dockerfile...\\n"
-  if ! curl -fsSL "$SIDECAR_UPDATER_DOCKERFILE_URL" -o "$sidecar_dockerfile_path"; then
-    echo -e "${RED}#${RESET} Failed to download the sidecar updater Dockerfile. Please check the URL and try again."
-    exit 1
-  fi
+  copy_or_download_file "${sidecar_dockerfile_source_path}" "${sidecar_dockerfile_url}" "${sidecar_dockerfile_path}" "the sidecar updater Dockerfile"
   echo -e "${GREEN}#${RESET} Sidecar updater Dockerfile downloaded successfully to $sidecar_dockerfile_path.\\n"
 
   echo -e "${YELLOW}#${RESET} Downloading sidecar updater script...\\n"
-  if ! curl -fsSL "$SIDECAR_UPDATER_SCRIPT_URL" -o "$sidecar_script_path"; then
-    echo -e "${RED}#${RESET} Failed to download the sidecar updater script. Please check the URL and try again."
-    exit 1
-  fi
+  copy_or_download_file "${sidecar_script_source_path}" "${sidecar_script_url}" "${sidecar_script_path}" "the sidecar updater script"
   chmod +x "$sidecar_script_path"
   echo -e "${GREEN}#${RESET} Sidecar updater script downloaded successfully to $sidecar_script_path.\\n"
 }
@@ -924,24 +1204,30 @@ download_helper_scripts() {
   local start_script_path="${NOMAD_DIR}/start_nomad.sh"
   local stop_script_path="${NOMAD_DIR}/stop_nomad.sh"
   local update_script_path="${NOMAD_DIR}/update_nomad.sh"
+  local start_script_source_path=''
+  local stop_script_source_path=''
+  local update_script_source_path=''
+  local start_script_url="${START_SCRIPT_URL}"
+  local stop_script_url="${STOP_SCRIPT_URL}"
+  local update_script_url="${UPDATE_SCRIPT_URL}"
+
+  if source_install_enabled; then
+    start_script_source_path="${source_repo_dir}/install/start_nomad.sh"
+    stop_script_source_path="${source_repo_dir}/install/stop_nomad.sh"
+    update_script_source_path="${source_repo_dir}/install/update_nomad.sh"
+    start_script_url=''
+    stop_script_url=''
+    update_script_url=''
+  fi
 
   echo -e "${YELLOW}#${RESET} Downloading helper scripts...\\n"
-  if ! curl -fsSL "$START_SCRIPT_URL" -o "$start_script_path"; then
-    echo -e "${RED}#${RESET} Failed to download the start script. Please check the URL and try again."
-    exit 1
-  fi
+  copy_or_download_file "${start_script_source_path}" "${start_script_url}" "${start_script_path}" "the start script"
   chmod +x "$start_script_path"
 
-  if ! curl -fsSL "$STOP_SCRIPT_URL" -o "$stop_script_path"; then
-    echo -e "${RED}#${RESET} Failed to download the stop script. Please check the URL and try again."
-    exit 1
-  fi
+  copy_or_download_file "${stop_script_source_path}" "${stop_script_url}" "${stop_script_path}" "the stop script"
   chmod +x "$stop_script_path"
 
-  if ! curl -fsSL "$UPDATE_SCRIPT_URL" -o "$update_script_path"; then
-    echo -e "${RED}#${RESET} Failed to download the update script. Please check the URL and try again."
-    exit 1
-  fi
+  copy_or_download_file "${update_script_source_path}" "${update_script_url}" "${update_script_path}" "the update script"
   chmod +x "$update_script_path"
 
   echo -e "${GREEN}#${RESET} Helper scripts downloaded successfully to $start_script_path, $stop_script_path, and $update_script_path.\\n"
@@ -949,7 +1235,7 @@ download_helper_scripts() {
 
 start_management_containers() {
   echo -e "${YELLOW}#${RESET} Starting management containers using docker compose...\\n"
-  if ! sudo docker compose -p project-nomad -f "${NOMAD_DIR}/compose.yml" up -d; then
+  if ! sudo docker compose -p project-nomad -f "${NOMAD_DIR}/compose.yml" up -d --build; then
     echo -e "${RED}#${RESET} Failed to start management containers. Please check the logs and try again."
     exit 1
   fi
@@ -972,11 +1258,16 @@ verify_gpu_setup() {
   
   # Check if NVIDIA GPU is present
   if command -v nvidia-smi &> /dev/null; then
-    echo -e "${GREEN}✓${RESET} NVIDIA GPU detected:"
-    nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | while read -r line; do
-      echo -e "  ${WHITE_R}$line${RESET}"
-    done
-    echo ""
+    local gpu_inventory=''
+    if gpu_inventory="$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null)"; then
+      echo -e "${GREEN}✓${RESET} NVIDIA GPU detected:"
+      while IFS= read -r line; do
+        [[ -n "${line}" ]] && echo -e "  ${WHITE_R}$line${RESET}"
+      done <<< "${gpu_inventory}"
+      echo ""
+    else
+      echo -e "${YELLOW}○${RESET} NVIDIA CLI is present but did not report an attached GPU in this session\\n"
+    fi
   else
     echo -e "${YELLOW}○${RESET} No NVIDIA GPU detected (nvidia-smi not available)\\n"
   fi
@@ -1021,6 +1312,9 @@ success_message() {
   echo -e "${GREEN}#${RESET} Installation files are located at /opt/project-nomad\\n\n"
   echo -e "${GREEN}#${RESET} Project N.O.M.A.D's Command Center should automatically start whenever your device reboots. However, if you need to start it manually, you can always do so by running: ${WHITE_R}${NOMAD_DIR}/start_nomad.sh${RESET}\\n"
   echo -e "${GREEN}#${RESET} You can now access the management interface at http://localhost:8080 or http://${local_ip_address}:8080\\n"
+  if [[ "${boot_order_update_applied}" == 'true' ]]; then
+    echo -e "${YELLOW}#${RESET} A Raspberry Pi EEPROM boot-order update was staged. Reboot the Pi before relying on the new SD-first boot preference.\\n"
+  fi
   echo -e "${GREEN}#${RESET} Full installer log: ${WHITE_R}${INSTALL_LOG_FILE}${RESET}\\n"
   echo -e "${GREEN}#${RESET} Thank you for supporting Project N.O.M.A.D!\\n"
 }
@@ -1064,12 +1358,21 @@ parse_script_args() {
         external_label="$2"
         shift 2
         ;;
+      --source-dir)
+        source_repo_dir="$2"
+        shift 2
+        ;;
       *)
         echo -e "${YELLOW}#${RESET} Ignoring unknown option: ${WHITE_R}$1${RESET}\\n"
         shift
         ;;
     esac
   done
+
+  if source_install_enabled && [[ ! -d "${source_repo_dir}" ]]; then
+    echo -e "${RED}#${RESET} Local source directory not found: ${WHITE_R}${source_repo_dir}${RESET}"
+    exit 1
+  fi
 }
 
 ###################################################################################################################################################################################################
@@ -1080,7 +1383,7 @@ parse_script_args() {
 
 parse_script_args "$@"
 setup_logging
-trap 'log_error_context $? ${LINENO} "${BASH_COMMAND}"' ERR
+trap 'exit_code=$?; log_error_context "$exit_code" ${LINENO} "${BASH_COMMAND}"; exit "$exit_code"' ERR
 print_log_location
 
 # Pre-flight checks
@@ -1120,6 +1423,8 @@ configure_external_storage
 run_runtime_preflight_checks
 get_local_ip
 create_nomad_directory
+prepare_local_build_source_checkout
+write_install_metadata
 download_wait_for_it_script
 download_entrypoint_script
 download_sidecar_files
