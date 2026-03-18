@@ -13,15 +13,18 @@ import Fuse, { IFuseOptions } from 'fuse.js'
 import { BROADCAST_CHANNELS } from '../../constants/broadcast.js'
 import env from '#start/env'
 import { NOMAD_API_DEFAULT_BASE_URL } from '../../constants/misc.js'
+import KVStore from '#models/kv_store'
 
 const NOMAD_MODELS_API_PATH = '/api/v1/ollama/models'
 const MODELS_CACHE_FILE = path.join(process.cwd(), 'storage', 'ollama-models-cache.json')
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000 // 24 hours
+const CHAT_MODEL_KEEP_ALIVE = '24h'
 
 @inject()
 export class OllamaService {
   private ollama: Ollama | null = null
   private ollamaInitPromise: Promise<void> | null = null
+  private prewarmPromise: Promise<void> | null = null
 
   constructor() { }
 
@@ -128,8 +131,10 @@ export class OllamaService {
     if (!this.ollama) {
       throw new Error('Ollama client is not initialized.')
     }
+    const keepAlive = await this.getChatModelKeepAlive(chatRequest.model)
     return await this.ollama.chat({
       ...chatRequest,
+      ...(keepAlive !== undefined ? { keep_alive: keepAlive } : {}),
       stream: false,
     })
   }
@@ -139,10 +144,81 @@ export class OllamaService {
     if (!this.ollama) {
       throw new Error('Ollama client is not initialized.')
     }
+    const keepAlive = await this.getChatModelKeepAlive(chatRequest.model)
     return await this.ollama.chat({
       ...chatRequest,
+      ...(keepAlive !== undefined ? { keep_alive: keepAlive } : {}),
       stream: true,
     })
+  }
+
+  public async prewarmConfiguredChatModel(): Promise<void> {
+    if (this.prewarmPromise) {
+      return this.prewarmPromise
+    }
+
+    this.prewarmPromise = (async () => {
+      try {
+        await this._ensureDependencies()
+        if (!this.ollama) {
+          return
+        }
+
+        const prewarmOnBoot = await KVStore.getValue('ollama.prewarmOnBoot')
+        if (prewarmOnBoot === false) {
+          return
+        }
+
+        const installedModels = await this.getModels()
+        if (!installedModels || installedModels.length === 0) {
+          return
+        }
+
+        const selectedModel = await KVStore.getValue('chat.lastModel')
+        const targetModel =
+          (selectedModel && installedModels.find((model) => model.name === selectedModel)?.name) ||
+          installedModels[0]?.name
+
+        if (!targetModel) {
+          return
+        }
+
+        const keepAlive = await this.getChatModelKeepAlive(targetModel)
+        logger.info(`[OllamaService] Prewarming selected chat model: ${targetModel}`)
+        await this.ollama.generate({
+          model: targetModel,
+          prompt: '',
+          stream: false,
+          ...(keepAlive !== undefined ? { keep_alive: keepAlive } : {}),
+        })
+      } catch (error) {
+        logger.warn(
+          `[OllamaService] Failed to prewarm configured chat model: ${error instanceof Error ? error.message : error}`
+        )
+      } finally {
+        this.prewarmPromise = null
+      }
+    })()
+
+    return this.prewarmPromise
+  }
+
+  private async getChatModelKeepAlive(modelName?: string): Promise<string | number | undefined> {
+    if (!modelName) {
+      return undefined
+    }
+
+    const keepModelWarm = await KVStore.getValue('ollama.keepModelWarm')
+    if (keepModelWarm === false) {
+      return undefined
+    }
+
+    const selectedModel = await KVStore.getValue('chat.lastModel')
+    if (!selectedModel || selectedModel !== modelName) {
+      return undefined
+    }
+
+    return CHAT_MODEL_KEEP_ALIVE
   }
 
   public async checkModelHasThinking(modelName: string): Promise<boolean> {

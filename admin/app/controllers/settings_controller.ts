@@ -55,6 +55,8 @@ export default class SettingsController {
         const installedModels = await this.ollamaService.getModels();
         const chatSuggestionsEnabled = await KVStore.getValue('chat.suggestionsEnabled')
         const aiAssistantCustomName = await KVStore.getValue('ai.assistantCustomName')
+        const prewarmOnBoot = await KVStore.getValue('ollama.prewarmOnBoot')
+        const keepModelWarm = await KVStore.getValue('ollama.keepModelWarm')
         return inertia.render('settings/models', {
             models: {
                 availableModels: availableModels?.models || [],
@@ -62,6 +64,8 @@ export default class SettingsController {
                 settings: {
                     chatSuggestionsEnabled: chatSuggestionsEnabled ?? false,
                     aiAssistantCustomName: aiAssistantCustomName ?? '',
+                    prewarmOnBoot: prewarmOnBoot ?? true,
+                    keepModelWarm: keepModelWarm ?? true,
                 }
             }
         });
@@ -107,6 +111,15 @@ export default class SettingsController {
     async updateSetting({ request, response }: HttpContext) {
         const reqData = await request.validateUsing(updateSettingSchema);
         await this.systemService.updateSetting(reqData.key, reqData.value);
+        if (
+            reqData.key === 'chat.lastModel' ||
+            reqData.key === 'ollama.prewarmOnBoot' ||
+            reqData.key === 'ollama.keepModelWarm'
+        ) {
+            this.ollamaService.prewarmConfiguredChatModel().catch((error) => {
+                console.error('Failed to prewarm configured chat model:', error)
+            })
+        }
         return response.status(200).send({ success: true, message: 'Setting updated successfully' });
     }
 }

@@ -76,6 +76,36 @@ export type SystemUpdateStatus = {
   timestamp: string
 }
 
+export type DiagnosticStatus = 'ok' | 'info' | 'warn' | 'error'
+
+export type DiagnosticCheck = {
+  key: string
+  title: string
+  status: DiagnosticStatus
+  summary: string
+  impact?: string
+  suggestedAction?: string
+  technicalDetails?: string[]
+  autoFixAction?: 'reconcile' | 'resume-installed' | 'retry-failed-embeddings' | 'retry-failed-downloads' | null
+}
+
+export type DiagnosticsResponse = {
+  generatedAt: string
+  summary: {
+    ok: number
+    info: number
+    warn: number
+    error: number
+  }
+  checks: DiagnosticCheck[]
+}
+
+export type ReconcileResponse = {
+  success: boolean
+  message: string
+  actions: string[]
+  skipped?: boolean
+}
 
 export type CheckLatestVersionResult = {
   success: boolean,

@@ -35,6 +35,13 @@ export type RunDownloadJobParams = Omit<
   }
 }
 
+export type ResolvedDownloadTarget = {
+  url: string
+  filename: string
+  version: string | null
+  changed: boolean
+}
+
 export type DownloadJobWithProgress = {
   jobId: string
   url: string

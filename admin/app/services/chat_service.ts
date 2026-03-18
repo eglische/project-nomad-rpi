@@ -13,11 +13,17 @@ export class ChatService {
 
   async getAllSessions() {
     try {
-      const sessions = await ChatSession.query().orderBy('updated_at', 'desc')
+      const sessions = await ChatSession.query()
+        .orderBy('folder', 'asc')
+        .orderBy('sort_order', 'asc')
+        .orderBy('updated_at', 'desc')
+
       return sessions.map((session) => ({
         id: session.id.toString(),
         title: session.title,
         model: session.model,
+        folder: session.folder,
+        sortOrder: session.sort_order,
         timestamp: session.updated_at.toJSDate(),
         lastMessage: null, // Will be populated from messages if needed
       }))
@@ -108,6 +114,8 @@ export class ChatService {
         id: session.id.toString(),
         title: session.title,
         model: session.model,
+        folder: session.folder,
+        sortOrder: session.sort_order,
         timestamp: session.updated_at.toJSDate(),
         messages: session.messages.map((msg) => ({
           id: msg.id.toString(),
@@ -126,17 +134,26 @@ export class ChatService {
     }
   }
 
-  async createSession(title: string, model?: string) {
+  async createSession(
+    title: string,
+    model?: string,
+    folder?: string | null,
+    sortOrder?: number
+  ) {
     try {
       const session = await ChatSession.create({
         title,
         model: model || null,
+        folder: folder ?? null,
+        sort_order: sortOrder ?? 0,
       })
 
       return {
         id: session.id.toString(),
         title: session.title,
         model: session.model,
+        folder: session.folder,
+        sortOrder: session.sort_order,
         timestamp: session.created_at.toJSDate(),
       }
     } catch (error) {
@@ -147,7 +164,10 @@ export class ChatService {
     }
   }
 
-  async updateSession(sessionId: number, data: { title?: string; model?: string }) {
+  async updateSession(
+    sessionId: number,
+    data: { title?: string; model?: string; folder?: string | null; sortOrder?: number }
+  ) {
     try {
       const session = await ChatSession.findOrFail(sessionId)
 
@@ -157,6 +177,12 @@ export class ChatService {
       if (data.model !== undefined) {
         session.model = data.model
       }
+      if (data.folder !== undefined) {
+        session.folder = data.folder
+      }
+      if (data.sortOrder !== undefined) {
+        session.sort_order = data.sortOrder
+      }
 
       await session.save()
 
@@ -164,6 +190,8 @@ export class ChatService {
         id: session.id.toString(),
         title: session.title,
         model: session.model,
+        folder: session.folder,
+        sortOrder: session.sort_order,
         timestamp: session.updated_at.toJSDate(),
       }
     } catch (error) {

@@ -2,6 +2,8 @@ import { DockerService } from '#services/docker_service';
 import { SystemService } from '#services/system_service'
 import { SystemUpdateService } from '#services/system_update_service'
 import { ContainerRegistryService } from '#services/container_registry_service'
+import { ActivityService } from '#services/activity_service'
+import { ReconciliationService } from '#services/reconciliation_service'
 import { CheckServiceUpdatesJob } from '#jobs/check_service_updates_job'
 import { affectServiceValidator, checkLatestVersionValidator, installServiceValidator, subscribeToReleaseNotesValidator, updateServiceValidator } from '#validators/system';
 import { inject } from '@adonisjs/core'
@@ -13,7 +15,9 @@ export default class SystemController {
         private systemService: SystemService,
         private dockerService: DockerService,
         private systemUpdateService: SystemUpdateService,
-        private containerRegistryService: ContainerRegistryService
+        private containerRegistryService: ContainerRegistryService,
+        private activityService: ActivityService,
+        private reconciliationService: ReconciliationService
     ) { }
 
     async getInternetStatus({ }: HttpContext) {
@@ -22,6 +26,59 @@ export default class SystemController {
 
     async getSystemInfo({ }: HttpContext) {
         return await this.systemService.getSystemInfo();
+    }
+
+    async getActivity({ }: HttpContext) {
+        return await this.activityService.getSystemActivity();
+    }
+
+    async getDiagnostics({ }: HttpContext) {
+        return await this.reconciliationService.getDiagnostics()
+    }
+
+    async reconcile({ response }: HttpContext) {
+        const result = await this.reconciliationService.reconcileNow({
+            reason: 'manual',
+            force: true,
+        })
+        response.send(result)
+    }
+
+    async resumeInstalledServices({ response }: HttpContext) {
+        const result = await this.reconciliationService.reconcileNow({
+            reason: 'manual',
+            resumeInstalledServices: true,
+            force: true,
+        })
+        response.send(result)
+    }
+
+    async retryFailedEmbeddingJobs({ response }: HttpContext) {
+        const retried = await this.reconciliationService.retryFailedEmbeddingJobs(20)
+        response.send({
+            success: true,
+            message: retried > 0
+                ? `Retried ${retried} failed embedding job${retried === 1 ? '' : 's'}.`
+                : 'No failed embedding jobs were available to retry.',
+            actions: retried > 0 ? [`Retried ${retried} failed embedding job${retried === 1 ? '' : 's'}`] : [],
+        })
+    }
+
+    async retryFailedDownloadJobs({ response }: HttpContext) {
+        const result = await this.reconciliationService.repairFailedDownloadJobs(20)
+        const actions = [
+            ...(result.retried > 0 ? [`Retried ${result.retried} failed download job${result.retried === 1 ? '' : 's'}`] : []),
+            ...(result.requeued > 0 ? [`Requeued ${result.requeued} moved-source download${result.requeued === 1 ? '' : 's'}`] : []),
+            ...(result.dismissed > 0 ? [`Dismissed ${result.dismissed} stale download failure${result.dismissed === 1 ? '' : 's'}`] : []),
+        ]
+
+        response.send({
+            success: true,
+            message: actions.length > 0
+                ? 'Download repair completed.'
+                : 'No failed download jobs needed action.',
+            actions,
+        })
     }
 
     async getServices({ }: HttpContext) {

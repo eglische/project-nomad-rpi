@@ -42,7 +42,12 @@ export default class ChatsController {
   async store({ request, response }: HttpContext) {
     try {
       const data = await request.validateUsing(createSessionSchema)
-      const session = await this.chatService.createSession(data.title, data.model)
+      const session = await this.chatService.createSession(
+        data.title,
+        data.model,
+        data.folder,
+        data.sortOrder
+      )
       return response.status(201).json(session)
     } catch (error) {
       return response.status(500).json({

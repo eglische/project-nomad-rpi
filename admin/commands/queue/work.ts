@@ -120,7 +120,7 @@ export default class QueueWork extends BaseCommand {
       [RunDownloadJob.queue]: 3,
       [DownloadModelJob.queue]: 2, // Lower concurrency for resource-intensive model downloads
       [RunBenchmarkJob.queue]: 1, // Run benchmarks one at a time for accurate results
-      [EmbedFileJob.queue]: 2, // Lower concurrency for embedding jobs, can be resource intensive
+      [EmbedFileJob.queue]: 1, // Keep embedding jobs from starving interactive Ollama requests on small hardware
       [CheckUpdateJob.queue]: 1, // No need to run more than one update check at a time
       default: 3,
     }

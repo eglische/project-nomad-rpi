@@ -138,3 +138,112 @@
   - `/dev/sdb1` reformatted and mounted at `/mnt/nomad-data`
   - data root created at `/mnt/nomad-data/project-nomad`
   - runtime preflight passed with the external storage present
+
+## 2026-03-18
+
+### Fresh-install and Pi arm64 validation
+
+- Verified the GitHub-driven install path on `192.168.1.14` using the forked repo content instead of the local checkout
+- Confirmed Nomad comes online cleanly on the Pi with:
+  - external storage mounted at `/mnt/nomad-data`
+  - Raspberry Pi EEPROM boot order left SD-first
+  - local `arm64` admin build path working
+- Confirmed `nomad_admin` health endpoint responds on:
+  - `http://127.0.0.1:8080/api/health`
+
+### Service/runtime arm64 fixes
+
+- Confirmed `ghcr.io/gchq/cyberchef:10.22.1` publishes `linux/arm64`
+- Reworked Pi logic to use upstream CyberChef on arm64 instead of a custom build
+- Verified `treehouses/kolibri:0.10.3` publishes `linux/arm64` and runs on the Pi
+- Updated Pi service logic so Kolibri resolves to the known-good upstream arm64 tag instead of the broken `0.12.8` arm path
+- Confirmed key services such as Ollama, Qdrant, Kiwix, Flatnotes, and CyberChef publish or run correctly on arm64
+
+### Installer and storage-path hardening
+
+- Fixed installer/runtime behavior so fresh installs pass the right storage path into the admin container
+- Fixed Kiwix command/runtime behavior so the service serves `.zim` files correctly from the mounted data directory
+- Added/validated migrations so existing installs can be repointed away from stale local-storage assumptions
+- Confirmed the easy-setup storage display was selecting the wrong disk and patched the wizard to prefer `/mnt/nomad-data`
+
+### AI runtime and diagnostics work
+
+- Verified Ollama model downloads complete and `llama3.1:latest` can run on CUDA with the RTX 4060 Ti
+- Added model keep-warm/prewarm settings on `/settings/models` so the selected chat model stays resident longer and cold-start pain is reduced
+- Added a dynamic chat warning when background jobs are active and likely to slow inference
+- Added a live `Health & Help` panel on `/settings/system`
+- Added a live `Activity` view for:
+  - embedding jobs
+  - downloads
+  - model downloads
+- Added backend diagnostics and reconciliation plumbing for:
+  - Docker reachability
+  - storage writability
+  - installed-service state
+  - Ollama reachability
+  - Qdrant reachability
+  - GPU visibility
+  - queue backlog / failures
+- Added manual UI actions for:
+  - soft reconciliation
+  - resume installed services
+  - retry failed embedding jobs
+- Added queue failure classification so users now see more useful categories such as:
+  - dependency unavailable
+  - source missing (`404`)
+  - stalled job
+
+### Service failure and host recovery findings
+
+- Found that the main retry storm was not caused by the external HDD
+- Confirmed the primary issue was that installed service containers had stopped while Nomad still considered them installed
+- Restarted the full Nomad app stack successfully with:
+  - `/opt/project-nomad/start_nomad.sh`
+- Later found the host root filesystem `/dev/mmcblk0p2` had remounted read-only
+- Confirmed Docker then failed because `/var/lib/docker` was on the read-only root filesystem
+- Remounted `/` read-write, restarted Docker, and recovered the Nomad stack
+- Important note:
+  - this indicates root-SD pressure or host filesystem instability is now an operational risk on this Pi
+
+### Root storage audit
+
+- Confirmed root filesystem usage is critically high:
+  - `/dev/mmcblk0p2` at roughly `98%`
+- Identified major local-root consumers for later cleanup review:
+  - `/var/lib/containerd`
+  - `/var/cache/apt`
+  - `/root/Downloads`
+  - `/root/nvidia-runfile-backup`
+  - `/opt/project-nomad/storage/ollama`
+- No deletions were performed in this session
+
+### ZIM source resilience work
+
+- Confirmed some failed ZIM downloads were permanent `404` cases, not transient network problems
+- Verified broken examples:
+  - `wikipedia_en_all_maxi_2024-01.zim`
+  - `devdocs_en_react_2026-01.zim`
+- Added Kiwix source resolution logic so Nomad now resolves stale Kiwix URLs to the current live file by `resource_id`
+- Confirmed the live resolver maps:
+  - `wikipedia_en_all_maxi_2024-01.zim` -> `wikipedia_en_all_maxi_2026-02.zim`
+  - `devdocs_en_react_2026-01.zim` -> `devdocs_en_react_2026-02.zim`
+- Added fallback logic so download workers can recover once on `404` by re-resolving the source before failing permanently
+
+### Remote Content Explorer rework
+
+- Reworked `/settings/zim/remote-explorer` into a more general remote content explorer
+- Added source-aware modes:
+  - `Kiwix Catalog`
+  - `Kiwix Repository Browser`
+  - `Direct URL Import`
+- Added source descriptions so users understand what each source actually is
+- Added raw repository browsing for `https://download.kiwix.org/zim/`
+- Added direct `.zim` URL import for manual or mirror-based content loading
+- Fixed repository browser metadata parsing so file sizes from raw Apache directory listings are shown correctly
+
+### End-of-session status
+
+- Live Pi stack is up
+- `nomad_admin` health endpoint responds
+- source-aware remote explorer backend and frontend are deployed locally on the Pi
+- all of the above still need to be pushed to GitHub before they become persistent for future GitHub-driven installs

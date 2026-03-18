@@ -6,6 +6,8 @@ import { DockerService } from '#services/docker_service'
 import { OllamaService } from '#services/ollama_service'
 import { createHash } from 'crypto'
 import logger from '@adonisjs/core/services/logger'
+import axios from 'axios'
+import { SERVICE_NAMES } from '../../constants/service_names.js'
 
 export interface EmbedFileJobParams {
   filePath: string
@@ -43,7 +45,12 @@ export class EmbedFileJob {
 
     try {
       // Check if Ollama and Qdrant services are ready
-      const existingModels = await ollamaService.getModels()
+      let existingModels
+      try {
+        existingModels = await ollamaService.getModels()
+      } catch (error) {
+        throw await this.buildActionableDependencyError(dockerService, error)
+      }
       if (!existingModels) {
         logger.warn('[EmbedFileJob] Ollama service not ready yet. Will retry...')
         throw new Error('Ollama service not ready yet')
@@ -53,6 +60,13 @@ export class EmbedFileJob {
       if (!qdrantUrl) {
         logger.warn('[EmbedFileJob] Qdrant service not ready yet. Will retry...')
         throw new Error('Qdrant service not ready yet')
+      }
+      try {
+        await axios.get(new URL('/collections', `${qdrantUrl}/`).toString(), { timeout: 5000 })
+      } catch (error) {
+        throw new Error(
+          `Qdrant service unavailable. Nomad will retry automatically once it becomes reachable. ${error instanceof Error ? error.message : error}`
+        )
       }
 
       logger.info(`[EmbedFileJob] Services ready. Processing file: ${fileName}`)
@@ -150,16 +164,19 @@ export class EmbedFileJob {
         message: `Successfully embedded ${result.chunks} chunks`,
       }
     } catch (error) {
-      logger.error(`[EmbedFileJob] Error embedding file ${fileName}:`, error)
+      const actionableError = await this.buildActionableError(dockerService, error)
+      logger.error(`[EmbedFileJob] Error embedding file ${fileName}:`, actionableError)
 
       await job.updateData({
         ...job.data,
         status: 'failed',
         failedAt: Date.now(),
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: actionableError.message,
+        errorType: actionableError.type,
+        suggestedAction: actionableError.suggestedAction,
       })
 
-      throw error
+      throw actionableError
     }
   }
 
@@ -246,6 +263,88 @@ export class EmbedFileJob {
       progress: typeof job.progress === 'number' ? job.progress : undefined,
       chunks: data.chunks,
       error: data.error,
+    }
+  }
+
+  private async buildActionableDependencyError(dockerService: DockerService, error: unknown): Promise<Error> {
+    const ollamaState = await this.getContainerState(dockerService, SERVICE_NAMES.OLLAMA)
+    if (!ollamaState.exists || ollamaState.state !== 'running') {
+      return new Error('Ollama service unavailable. Nomad will retry automatically once the AI service is running again.')
+    }
+
+    return new Error(
+      `Ollama API unavailable. Nomad will retry automatically. ${error instanceof Error ? error.message : error}`
+    )
+  }
+
+  private async buildActionableError(
+    dockerService: DockerService,
+    error: unknown
+  ): Promise<Error & { type?: string; suggestedAction?: string }> {
+    const message = error instanceof Error ? error.message : String(error)
+    const lower = message.toLowerCase()
+    const actionable = new Error(message) as Error & { type?: string; suggestedAction?: string }
+
+    if (lower.includes('ollama')) {
+      actionable.type = 'dependency_unreachable'
+      actionable.suggestedAction = 'Run diagnostics or resume blocked AI services.'
+      return actionable
+    }
+
+    if (lower.includes('qdrant')) {
+      actionable.type = 'dependency_unreachable'
+      actionable.suggestedAction = 'Run diagnostics or resume the vector database service.'
+      return actionable
+    }
+
+    if (lower.includes('stalled')) {
+      actionable.type = 'stalled'
+      actionable.suggestedAction = 'Retry the failed job once the system is healthy.'
+      return actionable
+    }
+
+    if (lower.includes('fetch failed')) {
+      const ollamaState = await this.getContainerState(dockerService, SERVICE_NAMES.OLLAMA)
+      const qdrantState = await this.getContainerState(dockerService, SERVICE_NAMES.QDRANT)
+
+      if (!ollamaState.exists || ollamaState.state !== 'running') {
+        actionable.message = 'Ollama service unavailable. Nomad will retry automatically once the AI service is running again.'
+        actionable.type = 'dependency_unreachable'
+        actionable.suggestedAction = 'Resume blocked AI services from System Settings.'
+        return actionable
+      }
+
+      if (!qdrantState.exists || qdrantState.state !== 'running') {
+        actionable.message = 'Qdrant service unavailable. Nomad will retry automatically once the vector database is running again.'
+        actionable.type = 'dependency_unreachable'
+        actionable.suggestedAction = 'Resume blocked AI services from System Settings.'
+        return actionable
+      }
+
+      actionable.message = 'A dependency request failed during indexing. Nomad will retry automatically, but diagnostics can help identify the blocking service.'
+      actionable.type = 'dependency_unreachable'
+      actionable.suggestedAction = 'Run diagnostics and check the Health & Help section.'
+      return actionable
+    }
+
+    actionable.type = 'unknown'
+    actionable.suggestedAction = 'Open diagnostics for more detail and retry once the issue is resolved.'
+    return actionable
+  }
+
+  private async getContainerState(dockerService: DockerService, containerName: string): Promise<{
+    exists: boolean
+    state?: string
+  }> {
+    const containers = await dockerService.docker.listContainers({ all: true })
+    const container = containers.find((item) => item.Names.includes(`/${containerName}`))
+    if (!container) {
+      return { exists: false }
+    }
+
+    return {
+      exists: true,
+      state: container.State,
     }
   }
 }

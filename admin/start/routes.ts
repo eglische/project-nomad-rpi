@@ -136,6 +136,8 @@ router
 router
   .group(() => {
     router.get('/info', [SystemController, 'getSystemInfo'])
+    router.get('/activity', [SystemController, 'getActivity'])
+    router.get('/diagnostics', [SystemController, 'getDiagnostics'])
     router.get('/internet-status', [SystemController, 'getInternetStatus'])
     router.get('/services', [SystemController, 'getServices'])
     router.post('/services/affect', [SystemController, 'affectService'])
@@ -144,6 +146,10 @@ router
     router.post('/services/check-updates', [SystemController, 'checkServiceUpdates'])
     router.get('/services/:name/available-versions', [SystemController, 'getAvailableVersions'])
     router.post('/services/update', [SystemController, 'updateService'])
+    router.post('/reconcile', [SystemController, 'reconcile'])
+    router.post('/resume-installed-services', [SystemController, 'resumeInstalledServices'])
+    router.post('/retry-failed-embedding-jobs', [SystemController, 'retryFailedEmbeddingJobs'])
+    router.post('/retry-failed-download-jobs', [SystemController, 'retryFailedDownloadJobs'])
     router.post('/subscribe-release-notes', [SystemController, 'subscribeToReleaseNotes'])
     router.get('/latest-version', [SystemController, 'checkLatestVersion'])
     router.post('/update', [SystemController, 'requestSystemUpdate'])
@@ -158,6 +164,8 @@ router
   .group(() => {
     router.get('/list', [ZimController, 'list'])
     router.get('/list-remote', [ZimController, 'listRemote'])
+    router.get('/sources', [ZimController, 'listSources'])
+    router.get('/browse-directory', [ZimController, 'browseRemoteDirectory'])
     router.get('/curated-categories', [ZimController, 'listCuratedCategories'])
     router.post('/download-remote', [ZimController, 'downloadRemote'])
     router.post('/download-category-tier', [ZimController, 'downloadCategoryTier'])

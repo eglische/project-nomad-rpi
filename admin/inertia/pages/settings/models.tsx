@@ -25,7 +25,12 @@ export default function ModelsPage(props: {
   models: {
     availableModels: NomadOllamaModel[]
     installedModels: ModelResponse[]
-    settings: { chatSuggestionsEnabled: boolean; aiAssistantCustomName: string }
+    settings: {
+      chatSuggestionsEnabled: boolean
+      aiAssistantCustomName: string
+      prewarmOnBoot: boolean
+      keepModelWarm: boolean
+    }
   }
 }) {
   const { aiAssistantName } = usePage<{ aiAssistantName: string }>().props
@@ -94,6 +99,8 @@ export default function ModelsPage(props: {
   const [chatSuggestionsEnabled, setChatSuggestionsEnabled] = useState(
     props.models.settings.chatSuggestionsEnabled
   )
+  const [prewarmOnBoot, setPrewarmOnBoot] = useState(props.models.settings.prewarmOnBoot)
+  const [keepModelWarm, setKeepModelWarm] = useState(props.models.settings.keepModelWarm)
   const [aiAssistantCustomName, setAiAssistantCustomName] = useState(
     props.models.settings.aiAssistantCustomName
   )
@@ -269,6 +276,24 @@ export default function ModelsPage(props: {
                 }}
                 label="Chat Suggestions"
                 description="Display AI-generated conversation starters in the chat interface"
+              />
+              <Switch
+                checked={prewarmOnBoot}
+                onChange={(newVal) => {
+                  setPrewarmOnBoot(newVal)
+                  updateSettingMutation.mutate({ key: 'ollama.prewarmOnBoot', value: newVal })
+                }}
+                label="Prewarm Selected Model On Boot"
+                description="Automatically load the currently selected chat model after startup so it is ready sooner when you open chat."
+              />
+              <Switch
+                checked={keepModelWarm}
+                onChange={(newVal) => {
+                  setKeepModelWarm(newVal)
+                  updateSettingMutation.mutate({ key: 'ollama.keepModelWarm', value: newVal })
+                }}
+                label="Keep Selected Model Warm"
+                description="Keep the selected chat model resident after use to reduce cold-start delays between conversations."
               />
               <Input
                 name="aiAssistantCustomName"

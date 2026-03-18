@@ -44,6 +44,39 @@ new Ignitor(APP_ROOT, { importer: IMPORTER })
         // Catch and log any errors during reconciliation to prevent the server from crashing
         console.error('Error during collection manifest reconciliation:', error)
       }
+
+      try {
+        const ollamaService = new (await import('#services/ollama_service')).OllamaService()
+        setTimeout(() => {
+          ollamaService.prewarmConfiguredChatModel().catch((error) => {
+            console.error('Error prewarming configured chat model:', error)
+          })
+        }, 5000)
+      } catch (error) {
+        console.error('Error scheduling chat model prewarm:', error)
+      }
+
+      try {
+        const { ReconciliationService } = await import('#services/reconciliation_service')
+        const reconciliationService = await app.container.make(ReconciliationService)
+        setTimeout(() => {
+          reconciliationService
+            .reconcileNow({ reason: 'periodic' })
+            .catch((error) => {
+              console.error('Error during initial reconciliation:', error)
+            })
+        }, 15000)
+
+        setInterval(() => {
+          reconciliationService
+            .reconcileNow({ reason: 'periodic' })
+            .catch((error) => {
+              console.error('Error during scheduled reconciliation:', error)
+            })
+        }, 2 * 60 * 1000)
+      } catch (error) {
+        console.error('Error scheduling reconciliation service:', error)
+      }
     })
   })
   .httpServer()

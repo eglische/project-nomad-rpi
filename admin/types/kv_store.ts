@@ -2,6 +2,9 @@
 export const KV_STORE_SCHEMA = {
   'chat.suggestionsEnabled':    'boolean',
   'chat.lastModel':             'string',
+  'chat.folders':               'string',
+  'ollama.prewarmOnBoot':       'boolean',
+  'ollama.keepModelWarm':       'boolean',
   'rag.docsEmbedded':           'boolean',
   'system.updateAvailable':     'boolean',
   'system.latestVersion':       'string',

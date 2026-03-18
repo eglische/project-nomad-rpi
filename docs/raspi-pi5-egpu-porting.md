@@ -238,6 +238,111 @@ For a full install, the script now:
 
 ### Automation flags
 
+## Current Working State As Of 2026-03-18
+
+- Fresh GitHub-driven installation has been validated end-to-end on `airig`
+- Nomad core management stack comes online on the Pi
+- arm64 service handling is now explicitly accounted for in the fork
+- external content/data storage is mounted at `/mnt/nomad-data`
+- AI runtime works with the RTX 4060 Ti through Docker/Ollama
+- Kiwix serves downloaded `.zim` files correctly from the Nomad data path
+
+Verified live behaviors:
+
+- `http://127.0.0.1:8080/api/health` returns `{"status":"ok"}`
+- CyberChef now uses upstream `arm64` image support
+- Kolibri uses the known-good upstream `arm64` tag path for the Pi
+- stale Kiwix ZIM URLs can now be resolved to current live versions
+- `/settings/system` exposes live activity, diagnostics, and user-facing recovery actions
+
+## Current Operational Risks
+
+### 1. Root SD pressure
+
+The Pi root filesystem is almost full and has already remounted read-only once during this work session.
+
+Observed state:
+
+- `/dev/mmcblk0p2` is roughly `98%` used
+- Docker failed when `/` became read-only because `/var/lib/docker` lives on the root disk
+
+Implication:
+
+- the external Nomad data disk is healthy, but root-SD pressure can still take the whole system down
+
+### 2. Root filesystem instability is now a real risk
+
+During this session:
+
+- `/` remounted read-only
+- Docker failed to start because `/var/lib/docker` was not writable
+- Nomad recovered only after:
+  - remounting `/` read-write
+  - restarting Docker
+  - restarting the Nomad stack
+
+This did not look like an external HDD failure. It looked like a host/root filesystem event.
+
+### 3. GitHub lag remains a deployment risk
+
+Many fixes in this fork were validated live on the Pi before being pushed upstream to the fork repo.
+
+Implication:
+
+- if local changes are not pushed promptly, a future GitHub-driven reinstall can regress to older behavior
+
+## ZIM Source Resilience Direction
+
+The fork no longer should rely on brittle hardcoded Kiwix file URLs alone.
+
+The current direction now implemented locally is:
+
+- resolve Kiwix downloads by stable `resource_id`
+- derive the current live `.zim` file/version from the repository directory
+- retry once on `404` with the newly resolved live file
+
+Confirmed live examples:
+
+- `wikipedia_en_all_maxi_2024-01.zim` resolves to `wikipedia_en_all_maxi_2026-02.zim`
+- `devdocs_en_react_2026-01.zim` resolves to `devdocs_en_react_2026-02.zim`
+
+This should remain the preferred design going forward.
+
+## Remote Explorer Direction
+
+The original `/settings/zim/remote-explorer` was too narrow for real-world content management.
+
+The new local direction is:
+
+- keep curated packs for easy installs
+- expose multiple remote-source modes for normal users and power users
+
+Current source modes implemented locally:
+
+- `Kiwix Catalog`
+  - searchable metadata-driven discovery
+- `Kiwix Repository Browser`
+  - raw repository exploration at `https://download.kiwix.org/zim/`
+- `Direct URL Import`
+  - user-supplied `.zim` URLs, including mirrors or manually discovered content
+
+This is the preferred UX direction for future work because it:
+
+- explains what each source actually is
+- avoids hiding the raw upstream repository
+- gives users a fallback when catalog entries are stale or incomplete
+
+## Follow-up Work For Next Session
+
+- push the locally validated fixes to GitHub so reinstall paths stay aligned with the live Pi
+- decide what can be safely removed from the root SD to reduce pressure
+- consider moving more runtime payload off the root SD if repeat read-only events occur
+- continue improving the remote explorer with:
+  - better per-source help text
+  - optional mirror support
+  - user-editable source overrides
+- continue the diagnostics/reconciliation work so host/runtime failures are surfaced more clearly in the frontend
+
 The installer now supports:
 
 - `--external-device /dev/sdX1`
@@ -297,3 +402,49 @@ Upstream defaults everything under `/opt/project-nomad/storage`, so this fork wi
 2. Replace/build arm64-incompatible images.
 3. Adapt Nomad service definitions so model storage also lands on the selected external disk where desired.
 4. Update management compose and related installer assets to use the fork-controlled service definitions.
+
+## Deferred TODOs
+
+### Maps catalog redesign for non-US deployments
+
+Current state:
+
+- Nomad's offline maps system can load arbitrary `.pmtiles` regions, but the curated catalog in `collections/maps.json` is currently US-centric.
+- The shipped collections are grouped into US regional buckets such as `Pacific Region`, `Mountain Region`, and `New England`.
+- Region files are relatively large because many entries are state-scale extracts.
+
+Deferred work:
+
+- redesign the maps manifest away from flat US-region collections and toward a geography-first structure
+- categorize maps by continent / macro-region first, then by country, then by subregion where needed
+- replace oversized state-scale defaults with smaller country-, province-, or metro-scale PMTiles where that makes sense
+- audit candidate international offline map sources and extract pipelines so Europe, Asia, Africa, South America, Oceania, and non-US North America can be offered cleanly
+- update Easy Setup and Maps Manager UI flows to browse by nation/region instead of US-only regional groupings
+
+Rationale:
+
+- the current renderer/backend is not the blocker; the limitation is the curated catalog shape and the source dataset selection
+- this should be handled after the core Raspberry Pi arm64 install path and service compatibility work is stable
+
+### RAG indexing and ZIM library expansion
+
+Current state:
+
+- Nomad chat does not query the running Kiwix server directly; it relies on the RAG pipeline.
+- ZIM files and other documents must be discovered, extracted, chunked, embedded, and written into Qdrant before chat can use them.
+- The current implementation works, but ownership of the full indexing flow, update path, and content-expansion workflow still needs deeper review.
+
+Deferred work:
+
+- trace the full RAG indexing pipeline end to end, including file discovery, ZIM extraction, chunking, embedding, queueing, and retrieval
+- document how background embedding jobs are scheduled, retried, resumed, and surfaced in the UI
+- determine how to take over and extend the indexing flow so new library content can be added and indexed on demand
+- design a clean way to create or refresh library indexes on the fly when new ZIM content is dropped into storage
+- audit how prepacks and manually added ZIM files should be discovered and merged into the searchable knowledge base
+- identify how to search for, evaluate, and add new ZIM sources so the library can be expanded in a controlled way
+- define a repeatable workflow for finding useful new Kiwix/OpenZIM content, importing it, indexing it, and verifying that chat retrieval actually uses it
+
+Rationale:
+
+- the Kiwix content itself is only half the system; usable chat over that content depends on a reliable, understandable RAG ingestion path
+- before expanding the library significantly, the indexing pipeline should be understood well enough to operate, tune, and extend without guesswork

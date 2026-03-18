@@ -65,6 +65,33 @@ export type RemoteZimFileEntry = {
   file_name: string
 }
 
+export type ZimRemoteSource = {
+  id: string
+  name: string
+  kind: 'catalog' | 'directory' | 'manual'
+  base_url?: string
+  description: string
+  capabilities: string[]
+}
+
+export type ZimDirectoryEntry = {
+  name: string
+  path: string
+  url: string
+  type: 'directory' | 'file'
+  size?: string
+  last_modified?: string
+  description?: string
+  inferred_title?: string
+}
+
+export type ListZimDirectoryResponse = {
+  source_id: string
+  current_path: string
+  parent_path?: string | null
+  entries: ZimDirectoryEntry[]
+}
+
 export type ExtractZIMContentOptions = {
   strategy?: ExtractZIMChunkingStrategy
   maxArticles?: number

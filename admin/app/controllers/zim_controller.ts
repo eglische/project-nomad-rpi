@@ -24,16 +24,27 @@ export default class ZimController {
     return await this.zimService.listRemote({ start, count, query })
   }
 
+  async listSources({}: HttpContext) {
+    return { sources: this.zimService.listSources() }
+  }
+
+  async browseRemoteDirectory({ request }: HttpContext) {
+    const path = String(request.input('path', ''))
+    const query = request.input('query') ? String(request.input('query')) : undefined
+    return await this.zimService.browseRemoteDirectory({ path, query })
+  }
+
   async downloadRemote({ request }: HttpContext) {
     const payload = await request.validateUsing(remoteDownloadWithMetadataValidator)
     assertNotPrivateUrl(payload.url)
-    const { filename, jobId } = await this.zimService.downloadRemote(payload.url)
+    const { filename, jobId, resolvedUrl } = await this.zimService.downloadRemote(payload.url)
 
     return {
       message: 'Download started successfully',
       filename,
       jobId,
-      url: payload.url,
+      url: resolvedUrl,
+      requestedUrl: payload.url,
     }
   }
 

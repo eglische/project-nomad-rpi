@@ -2,6 +2,9 @@ import {
   ListRemoteZimFilesResponse,
   RawRemoteZimFileEntry,
   RemoteZimFileEntry,
+  ListZimDirectoryResponse,
+  ZimDirectoryEntry,
+  ZimRemoteSource,
 } from '../../types/zim.js'
 import axios from 'axios'
 import { XMLParser } from 'fast-xml-parser'
@@ -18,6 +21,7 @@ import {
 } from '../utils/fs.js'
 import { join, resolve, sep } from 'path'
 import { WikipediaOption, WikipediaState } from '../../types/downloads.js'
+import type { ResolvedDownloadTarget } from '../../types/downloads.js'
 import vine from '@vinejs/vine'
 import { wikipediaOptionsFileSchema } from '#validators/curated_collections'
 import WikipediaSelection from '#models/wikipedia_selection'
@@ -29,10 +33,122 @@ import type { CategoryWithStatus } from '../../types/collections.js'
 
 const ZIM_MIME_TYPES = ['application/x-zim', 'application/x-openzim', 'application/octet-stream']
 const WIKIPEDIA_OPTIONS_URL = 'https://raw.githubusercontent.com/eglische/project-nomad-rpi/refs/heads/main/collections/wikipedia.json'
+const KIWIX_DOWNLOAD_HOST = 'download.kiwix.org'
+const KIWIX_DIRECTORY_ROOT = 'https://download.kiwix.org/zim/'
+const REMOTE_SOURCES: ZimRemoteSource[] = [
+  {
+    id: 'kiwix_catalog',
+    name: 'Kiwix Catalog',
+    kind: 'catalog',
+    base_url: 'https://browse.library.kiwix.org/catalog/v2/entries',
+    description: 'Searchable Kiwix catalog with titles, summaries, authors, and metadata. Best for normal discovery.',
+    capabilities: ['search', 'metadata', 'download'],
+  },
+  {
+    id: 'kiwix_directory',
+    name: 'Kiwix Repository Browser',
+    kind: 'directory',
+    base_url: KIWIX_DIRECTORY_ROOT,
+    description: 'Raw repository browser for the full Kiwix ZIM tree. Best when you want to explore categories and files directly.',
+    capabilities: ['browse', 'download', 'manual selection'],
+  },
+  {
+    id: 'manual_url',
+    name: 'Direct URL Import',
+    kind: 'manual',
+    description: 'Paste a direct .zim URL from Kiwix or another trusted mirror when you already know the exact file you want.',
+    capabilities: ['manual selection', 'download'],
+  },
+]
 
 @inject()
 export class ZimService {
   constructor(private dockerService: DockerService) { }
+
+  listSources(): ZimRemoteSource[] {
+    return REMOTE_SOURCES
+  }
+
+  async resolveRemoteDownloadTarget(
+    url: string,
+    resourceId?: string,
+    preferredVersion?: string
+  ): Promise<ResolvedDownloadTarget> {
+    const parsedUrl = new URL(url)
+    const filename = url.split('/').pop() || ''
+    const parsedFilename = CollectionManifestService.parseZimFilename(filename)
+    const effectiveResourceId = resourceId || parsedFilename?.resource_id
+    const effectiveVersion = preferredVersion || parsedFilename?.version || null
+
+    if (
+      parsedUrl.hostname !== KIWIX_DOWNLOAD_HOST ||
+      !parsedUrl.pathname.endsWith('.zim') ||
+      !effectiveResourceId
+    ) {
+      return {
+        url,
+        filename,
+        version: effectiveVersion,
+        changed: false,
+      }
+    }
+
+    const directoryUrl = new URL(
+      `${parsedUrl.pathname.substring(0, parsedUrl.pathname.lastIndexOf('/') + 1)}`,
+      `${parsedUrl.protocol}//${parsedUrl.host}`
+    ).toString()
+
+    try {
+      const response = await axios.get(directoryUrl, {
+        timeout: 15000,
+        responseType: 'text',
+      })
+      const html = String(response.data)
+      const escapedResourceId = effectiveResourceId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const regex = new RegExp(`${escapedResourceId}_(\\d{4}-\\d{2})\\.zim`, 'g')
+      const matches = new Set<string>()
+
+      for (const match of html.matchAll(regex)) {
+        matches.add(match[0])
+      }
+
+      if (matches.size === 0) {
+        return {
+          url,
+          filename,
+          version: effectiveVersion,
+          changed: false,
+        }
+      }
+
+      const available = Array.from(matches).sort((a, b) => a.localeCompare(b))
+      const preferredFilename =
+        effectiveVersion ? `${effectiveResourceId}_${effectiveVersion}.zim` : null
+      const resolvedFilename = preferredFilename && matches.has(preferredFilename)
+        ? preferredFilename
+        : available[available.length - 1]
+
+      const resolvedUrl = new URL(resolvedFilename, directoryUrl).toString()
+      const resolvedParsed = CollectionManifestService.parseZimFilename(resolvedFilename)
+
+      return {
+        url: resolvedUrl,
+        filename: resolvedFilename,
+        version: resolvedParsed?.version || effectiveVersion,
+        changed: resolvedUrl !== url,
+      }
+    } catch (error) {
+      logger.warn(
+        `[ZimService] Failed to resolve live Kiwix URL for ${url}: ${error instanceof Error ? error.message : error}`
+      )
+      return {
+        url,
+        filename,
+        version: effectiveVersion,
+        changed: false,
+      }
+    }
+  }
 
   async list() {
     const dirPath = join(process.cwd(), ZIM_STORAGE_PATH)
@@ -137,19 +253,102 @@ export class ZimService {
     }
   }
 
-  async downloadRemote(url: string): Promise<{ filename: string; jobId?: string }> {
+  async browseRemoteDirectory({
+    path = '',
+    query,
+  }: {
+    path?: string
+    query?: string
+  }): Promise<ListZimDirectoryResponse> {
+    const normalizedPath = path
+      .split('/')
+      .filter(Boolean)
+      .join('/')
+    const baseUrl = new URL(normalizedPath ? `${normalizedPath}/` : '', KIWIX_DIRECTORY_ROOT).toString()
+    const response = await axios.get(baseUrl, {
+      timeout: 15000,
+      responseType: 'text',
+    })
+    const html = String(response.data)
+    const entries: ZimDirectoryEntry[] = []
+    const lines = html.split('\n')
+
+    for (const line of lines) {
+      const anchorMatch = line.match(/<a href="([^"]+)">([^<]+)<\/a>/)
+      if (!anchorMatch) continue
+
+      const [, href, rawName] = anchorMatch
+      const name = rawName.trim()
+      if (!href || !name || name === 'Parent Directory') continue
+
+      const isDirectory = href.endsWith('/')
+      if (!isDirectory && !href.endsWith('.zim')) continue
+
+      const trailing = line.slice(line.indexOf(anchorMatch[0]) + anchorMatch[0].length)
+      const metaMatch = trailing.match(/(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+([0-9.]+[KMGTP]?|-)/)
+      const cleanName = name.replace(/\/$/, '')
+      const nextPath = normalizedPath ? `${normalizedPath}/${cleanName}` : cleanName
+      const fileUrl = new URL(href, baseUrl).toString()
+      const inferred = isDirectory ? this.describeDirectory(cleanName) : this.describeFile(cleanName)
+
+      entries.push({
+        name: cleanName,
+        path: nextPath,
+        url: fileUrl,
+        type: isDirectory ? 'directory' : 'file',
+        size: !isDirectory && metaMatch?.[2] && metaMatch[2] !== '-' ? metaMatch[2] : undefined,
+        last_modified: metaMatch?.[1],
+        description: inferred.description,
+        inferred_title: inferred.title,
+      })
+    }
+
+    const filtered = !query
+      ? entries
+      : entries.filter((entry) => {
+          const haystack = `${entry.name} ${entry.path} ${entry.inferred_title || ''} ${entry.description || ''}`.toLowerCase()
+          return haystack.includes(query.toLowerCase())
+        })
+
+    filtered.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
+      return a.name.localeCompare(b.name)
+    })
+
+    const parentPath = normalizedPath.includes('/')
+      ? normalizedPath.split('/').slice(0, -1).join('/')
+      : normalizedPath
+        ? ''
+        : null
+
+    return {
+      source_id: 'kiwix_directory',
+      current_path: normalizedPath,
+      parent_path: parentPath,
+      entries: filtered,
+    }
+  }
+
+  async downloadRemote(url: string): Promise<{ filename: string; jobId?: string; resolvedUrl: string }> {
     const parsed = new URL(url)
     if (!parsed.pathname.endsWith('.zim')) {
       throw new Error(`Invalid ZIM file URL: ${url}. URL must end with .zim`)
     }
 
-    const existing = await RunDownloadJob.getByUrl(url)
+    const parsedSourceFilename = CollectionManifestService.parseZimFilename(url.split('/').pop() || '')
+    const resolved = await this.resolveRemoteDownloadTarget(
+      url,
+      parsedSourceFilename?.resource_id,
+      parsedSourceFilename?.version
+    )
+
+    const existing = await RunDownloadJob.getByUrl(resolved.url)
     if (existing) {
       throw new Error('A download for this URL is already in progress')
     }
 
     // Extract the filename from the URL
-    const filename = url.split('/').pop()
+    const filename = resolved.filename
     if (!filename) {
       throw new Error('Could not determine filename from URL')
     }
@@ -157,14 +356,14 @@ export class ZimService {
     const filepath = join(process.cwd(), ZIM_STORAGE_PATH, filename)
 
     // Parse resource metadata for the download job
-    const parsedFilename = CollectionManifestService.parseZimFilename(filename)
-    const resourceMetadata = parsedFilename
-      ? { resource_id: parsedFilename.resource_id, version: parsedFilename.version, collection_ref: null }
+    const parsedResolvedFilename = CollectionManifestService.parseZimFilename(filename)
+    const resourceMetadata = parsedResolvedFilename
+      ? { resource_id: parsedResolvedFilename.resource_id, version: parsedResolvedFilename.version, collection_ref: null }
       : undefined
 
     // Dispatch a background download job
     const result = await RunDownloadJob.dispatch({
-      url,
+      url: resolved.url,
       filepath,
       timeout: 30000,
       allowedMimeTypes: ZIM_MIME_TYPES,
@@ -182,6 +381,37 @@ export class ZimService {
     return {
       filename,
       jobId: result.job.id,
+      resolvedUrl: resolved.url,
+    }
+  }
+
+  private describeDirectory(name: string): { title: string; description: string } {
+    const title = name.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+    const descriptions: Record<string, string> = {
+      wikipedia: 'Wikipedia snapshots in different sizes and language variants.',
+      devdocs: 'Offline developer documentation exports generated from DevDocs content.',
+      stack_exchange: 'Stack Exchange communities packaged as offline ZIM archives.',
+      ted: 'TED talks and TED-Ed offline archives.',
+      gutenberg: 'Project Gutenberg books grouped by subject and collection.',
+    }
+    return {
+      title,
+      description: descriptions[name] || 'Repository folder containing ZIM archives and versions.',
+    }
+  }
+
+  private describeFile(name: string): { title: string; description: string } {
+    const parsed = CollectionManifestService.parseZimFilename(name)
+    if (!parsed) {
+      return {
+        title: name,
+        description: 'ZIM archive available from the selected remote repository.',
+      }
+    }
+
+    return {
+      title: parsed.resource_id.replace(/[._-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+      description: `Version ${parsed.version} ZIM archive from the selected remote repository.`,
     }
   }
 
@@ -219,20 +449,25 @@ export class ZimService {
     const downloadFilenames: string[] = []
 
     for (const resource of toDownload) {
-      const existingJob = await RunDownloadJob.getByUrl(resource.url)
+      const resolved = await this.resolveRemoteDownloadTarget(
+        resource.url,
+        resource.id,
+        resource.version
+      )
+      const existingJob = await RunDownloadJob.getByUrl(resolved.url)
       if (existingJob) {
-        logger.warn(`[ZimService] Download already in progress for ${resource.url}, skipping.`)
+        logger.warn(`[ZimService] Download already in progress for ${resolved.url}, skipping.`)
         continue
       }
 
-      const filename = resource.url.split('/').pop()
+      const filename = resolved.filename
       if (!filename) continue
 
       downloadFilenames.push(filename)
       const filepath = join(process.cwd(), ZIM_STORAGE_PATH, filename)
 
       await RunDownloadJob.dispatch({
-        url: resource.url,
+        url: resolved.url,
         filepath,
         timeout: 30000,
         allowedMimeTypes: ZIM_MIME_TYPES,

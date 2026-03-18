@@ -12,6 +12,9 @@ export interface ChatMessage {
 export interface ChatSession {
   id: string
   title: string
+  model?: string | null
+  folder?: string | null
+  sortOrder?: number
   lastMessage?: string
   timestamp: Date
 }

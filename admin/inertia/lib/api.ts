@@ -1,10 +1,11 @@
 import axios, { AxiosInstance } from 'axios'
-import { ListRemoteZimFilesResponse, ListZimFilesResponse } from '../../types/zim'
+import { ListRemoteZimFilesResponse, ListZimDirectoryResponse, ListZimFilesResponse, ZimRemoteSource } from '../../types/zim'
 import { ServiceSlim } from '../../types/services'
 import { FileEntry } from '../../types/files'
-import { CheckLatestVersionResult, SystemInformationResponse, SystemUpdateStatus } from '../../types/system'
+import { CheckLatestVersionResult, DiagnosticsResponse, ReconcileResponse, SystemInformationResponse, SystemUpdateStatus } from '../../types/system'
 import { DownloadJobWithProgress, WikipediaState } from '../../types/downloads'
 import { EmbedJobWithProgress } from '../../types/rag'
+import { SystemActivityResponse } from '../../types/activity'
 import type { CategoryWithStatus, CollectionWithStatus, ContentUpdateCheckResult, ResourceUpdateInfo } from '../../types/collections'
 import { catchInternal } from './util'
 import { NomadOllamaModel, OllamaChatRequest } from '../../types/ollama'
@@ -316,6 +317,8 @@ class API {
           id: string
           title: string
           model: string | null
+          folder: string | null
+          sortOrder: number
           timestamp: string
           lastMessage: string | null
         }>
@@ -330,6 +333,8 @@ class API {
         id: string
         title: string
         model: string | null
+        folder: string | null
+        sortOrder: number
         timestamp: string
         messages: Array<{
           id: string
@@ -342,24 +347,36 @@ class API {
     })()
   }
 
-  async createChatSession(title: string, model?: string) {
+  async createChatSession(
+    title: string,
+    model?: string,
+    folder?: string | null,
+    sortOrder?: number
+  ) {
     return catchInternal(async () => {
       const response = await this.client.post<{
         id: string
         title: string
         model: string | null
+        folder: string | null
+        sortOrder: number
         timestamp: string
-      }>('/chat/sessions', { title, model })
+      }>('/chat/sessions', { title, model, folder, sortOrder })
       return response.data
     })()
   }
 
-  async updateChatSession(sessionId: string, data: { title?: string; model?: string }) {
+  async updateChatSession(
+    sessionId: string,
+    data: { title?: string; model?: string; folder?: string | null; sortOrder?: number }
+  ) {
     return catchInternal(async () => {
       const response = await this.client.put<{
         id: string
         title: string
         model: string | null
+        folder: string | null
+        sortOrder: number
         timestamp: string
       }>(`/chat/sessions/${sessionId}`, data)
       return response.data
@@ -417,6 +434,48 @@ class API {
   async getSystemInfo() {
     return catchInternal(async () => {
       const response = await this.client.get<SystemInformationResponse>('/system/info')
+      return response.data
+    })()
+  }
+
+  async getSystemActivity() {
+    return catchInternal(async () => {
+      const response = await this.client.get<SystemActivityResponse>('/system/activity')
+      return response.data
+    })()
+  }
+
+  async getSystemDiagnostics() {
+    return catchInternal(async () => {
+      const response = await this.client.get<DiagnosticsResponse>('/system/diagnostics')
+      return response.data
+    })()
+  }
+
+  async reconcileSystem() {
+    return catchInternal(async () => {
+      const response = await this.client.post<ReconcileResponse>('/system/reconcile')
+      return response.data
+    })()
+  }
+
+  async resumeInstalledServices() {
+    return catchInternal(async () => {
+      const response = await this.client.post<ReconcileResponse>('/system/resume-installed-services')
+      return response.data
+    })()
+  }
+
+  async retryFailedEmbeddingJobs() {
+    return catchInternal(async () => {
+      const response = await this.client.post<ReconcileResponse>('/system/retry-failed-embedding-jobs')
+      return response.data
+    })()
+  }
+
+  async retryFailedDownloadJobs() {
+    return catchInternal(async () => {
+      const response = await this.client.post<ReconcileResponse>('/system/retry-failed-download-jobs')
       return response.data
     })()
   }
@@ -508,6 +567,28 @@ class API {
           query,
         },
       })
+    })()
+  }
+
+  async listZimSources() {
+    return catchInternal(async () => {
+      const response = await this.client.get<{ sources: ZimRemoteSource[] }>('/zim/sources')
+      return response.data.sources
+    })()
+  }
+
+  async browseRemoteZimDirectory({
+    path = '',
+    query,
+  }: {
+    path?: string
+    query?: string
+  }) {
+    return catchInternal(async () => {
+      const response = await this.client.get<ListZimDirectoryResponse>('/zim/browse-directory', {
+        params: { path, query },
+      })
+      return response.data
     })()
   }
 

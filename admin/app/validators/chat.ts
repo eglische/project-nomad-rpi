@@ -4,6 +4,8 @@ export const createSessionSchema = vine.compile(
   vine.object({
     title: vine.string().trim().minLength(1).maxLength(200),
     model: vine.string().trim().optional(),
+    folder: vine.string().trim().maxLength(120).nullable().optional(),
+    sortOrder: vine.number().withoutDecimals().optional(),
   })
 )
 
@@ -11,6 +13,8 @@ export const updateSessionSchema = vine.compile(
   vine.object({
     title: vine.string().trim().minLength(1).maxLength(200).optional(),
     model: vine.string().trim().optional(),
+    folder: vine.string().trim().maxLength(120).nullable().optional(),
+    sortOrder: vine.number().withoutDecimals().optional(),
   })
 )
 

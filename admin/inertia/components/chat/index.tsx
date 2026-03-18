@@ -6,11 +6,14 @@ import StyledModal from '../StyledModal'
 import api from '~/lib/api'
 import { formatBytes } from '~/lib/util'
 import { useModals } from '~/context/ModalContext'
+import { useNotifications } from '~/context/NotificationContext'
 import { ChatMessage } from '../../../types/chat'
 import classNames from '~/lib/classNames'
 import { IconX } from '@tabler/icons-react'
 import { DEFAULT_QUERY_REWRITE_MODEL } from '../../../constants/ollama'
 import { useSystemSetting } from '~/hooks/useSystemSetting'
+import useDownloads from '~/hooks/useDownloads'
+import useEmbedJobs from '~/hooks/useEmbedJobs'
 
 interface ChatProps {
   enabled: boolean
@@ -29,6 +32,7 @@ export default function Chat({
 }: ChatProps) {
   const queryClient = useQueryClient()
   const { openModal, closeAllModals } = useModals()
+  const { addNotification } = useNotifications()
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [selectedModel, setSelectedModel] = useState<string>('')
@@ -45,6 +49,8 @@ export default function Chat({
         id: s.id,
         title: s.title,
         model: s.model || undefined,
+        folder: s.folder,
+        sortOrder: s.sortOrder,
         timestamp: new Date(s.timestamp),
         lastMessage: s.lastMessage || undefined,
       })) || [],
@@ -53,6 +59,7 @@ export default function Chat({
   const activeSession = sessions.find((s) => s.id === activeSessionId)
 
   const { data: lastModelSetting } = useSystemSetting({ key: 'chat.lastModel', enabled })
+  const { data: chatFoldersSetting } = useSystemSetting({ key: 'chat.folders', enabled })
 
   const { data: installedModels = [], isLoading: isLoadingModels } = useQuery({
     queryKey: ['installedModels'],
@@ -60,6 +67,8 @@ export default function Chat({
     enabled,
     select: (data) => data || [],
   })
+  const { data: activeDownloads = [] } = useDownloads({ enabled })
+  const { data: activeEmbedJobs = [] } = useEmbedJobs({ enabled })
 
   const { data: chatSuggestions, isLoading: chatSuggestionsLoading } = useQuery<string[]>({
     queryKey: ['chatSuggestions'],
@@ -76,6 +85,46 @@ export default function Chat({
     return installedModels.some(model => model.name === DEFAULT_QUERY_REWRITE_MODEL)
   }, [installedModels])
 
+  const folders = useMemo(() => {
+    const raw = chatFoldersSetting?.value
+    if (!raw || typeof raw !== 'string') {
+      return [] as string[]
+    }
+
+    try {
+      const parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) {
+        return []
+      }
+
+      return parsed
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean)
+    } catch {
+      return []
+    }
+  }, [chatFoldersSetting])
+
+  const backgroundInferenceWarning = useMemo(() => {
+    const impactfulDownloads = activeDownloads.filter((job) => job.progress < 100)
+    const activeEmbeds = activeEmbedJobs.filter((job) => job.progress < 100)
+
+    if (impactfulDownloads.length === 0 && activeEmbeds.length === 0) {
+      return null
+    }
+
+    const parts: string[] = []
+    if (activeEmbeds.length > 0) {
+      parts.push(`${activeEmbeds.length} embedding job${activeEmbeds.length === 1 ? '' : 's'}`)
+    }
+    if (impactfulDownloads.length > 0) {
+      parts.push(`${impactfulDownloads.length} download${impactfulDownloads.length === 1 ? '' : 's'}`)
+    }
+
+    return `${parts.join(' and ')} running in the background may slow replies.`
+  }, [activeDownloads, activeEmbedJobs])
+
   const deleteAllSessionsMutation = useMutation({
     mutationFn: () => api.deleteAllChatSessions(),
     onSuccess: () => {
@@ -85,6 +134,14 @@ export default function Chat({
       closeAllModals()
     },
   })
+
+  const saveFolders = useCallback(
+    async (nextFolders: string[]) => {
+      await api.updateSetting('chat.folders', JSON.stringify(nextFolders))
+      await queryClient.invalidateQueries({ queryKey: ['system-setting', 'chat.folders'] })
+    },
+    [queryClient]
+  )
 
   const chatMutation = useMutation({
     mutationFn: (request: {
@@ -168,6 +225,137 @@ export default function Chat({
     )
   }, [openModal, closeAllModals, deleteAllSessionsMutation])
 
+  const handleRenameSession = useCallback(
+    async (sessionId: string, title: string) => {
+      await api.updateChatSession(sessionId, { title })
+      await queryClient.invalidateQueries({ queryKey: ['chatSessions'] })
+    },
+    [queryClient]
+  )
+
+  const handleDeleteSession = useCallback(
+    async (sessionId: string) => {
+      const session = sessions.find((item) => item.id === sessionId)
+      if (!session) return
+
+      openModal(
+        <StyledModal
+          title="Delete Chat?"
+          onConfirm={async () => {
+            await api.deleteChatSession(sessionId)
+            if (activeSessionId === sessionId) {
+              setActiveSessionId(null)
+              setMessages([])
+            }
+            await queryClient.invalidateQueries({ queryKey: ['chatSessions'] })
+            closeAllModals()
+          }}
+          onCancel={closeAllModals}
+          open={true}
+          confirmText="Delete"
+          cancelText="Cancel"
+          confirmVariant="danger"
+        >
+          <p className="text-gray-700">
+            Delete <span className="font-semibold">{session.title}</span>? This cannot be undone.
+          </p>
+        </StyledModal>,
+        'confirm-delete-chat-modal'
+      )
+    },
+    [activeSessionId, closeAllModals, openModal, queryClient, sessions]
+  )
+
+  const handleCreateFolder = useCallback(
+    async (name: string) => {
+      const trimmed = name.trim()
+      if (!trimmed) return
+      if (folders.includes(trimmed)) {
+        addNotification({ type: 'error', message: 'A folder with that name already exists.' })
+        return
+      }
+      await saveFolders([...folders, trimmed])
+    },
+    [addNotification, folders, saveFolders]
+  )
+
+  const handleRenameFolder = useCallback(
+    async (currentName: string, nextName: string) => {
+      const trimmed = nextName.trim()
+      if (!trimmed || currentName === trimmed) return
+      if (folders.includes(trimmed)) {
+        addNotification({ type: 'error', message: 'A folder with that name already exists.' })
+        return
+      }
+
+      await saveFolders(folders.map((folder) => (folder === currentName ? trimmed : folder)))
+
+      const affected = sessions.filter((session) => session.folder === currentName)
+      await Promise.all(
+        affected.map((session, index) =>
+          api.updateChatSession(session.id, {
+            folder: trimmed,
+            sortOrder: session.sortOrder ?? index,
+          })
+        )
+      )
+      await queryClient.invalidateQueries({ queryKey: ['chatSessions'] })
+    },
+    [addNotification, folders, queryClient, saveFolders, sessions]
+  )
+
+  const handleDeleteFolder = useCallback(
+    async (name: string) => {
+      const affected = sessions.filter((session) => session.folder === name)
+
+      openModal(
+        <StyledModal
+          title="Delete Folder?"
+          onConfirm={async () => {
+            await saveFolders(folders.filter((folder) => folder !== name))
+            await Promise.all(
+              affected.map((session, index) =>
+                api.updateChatSession(session.id, {
+                  folder: null,
+                  sortOrder: index,
+                })
+              )
+            )
+            await queryClient.invalidateQueries({ queryKey: ['chatSessions'] })
+            closeAllModals()
+          }}
+          onCancel={closeAllModals}
+          open={true}
+          confirmText="Delete Folder"
+          cancelText="Cancel"
+          confirmVariant="danger"
+        >
+          <p className="text-gray-700">
+            Delete <span className="font-semibold">{name}</span>? Chats inside it will be moved back
+            to Ungrouped.
+          </p>
+        </StyledModal>,
+        'confirm-delete-folder-modal'
+      )
+    },
+    [closeAllModals, folders, openModal, queryClient, saveFolders, sessions]
+  )
+
+  const handleMoveSessionToFolder = useCallback(
+    async (sessionId: string, folder: string | null) => {
+      const targetSessions = sessions
+        .filter((session) => (session.folder ?? null) === folder && session.id !== sessionId)
+        .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+
+      await api.updateChatSession(sessionId, {
+        folder,
+        sortOrder: targetSessions.length,
+      })
+      await queryClient.invalidateQueries({ queryKey: ['chatSessions'] })
+    },
+    [queryClient, sessions]
+  )
+
   const handleSessionSelect = useCallback(
     async (sessionId: string) => {
       // Cancel any ongoing suggestions fetch
@@ -203,7 +391,7 @@ export default function Chat({
 
       // Create a new session if none exists
       if (!sessionId) {
-        const newSession = await api.createChatSession('New Chat', selectedModel)
+        const newSession = await api.createChatSession('New Chat', selectedModel, null, sessions.length)
         if (newSession) {
           sessionId = newSession.id
           setActiveSessionId(sessionId)
@@ -351,10 +539,17 @@ export default function Chat({
     >
       <ChatSidebar
         sessions={sessions}
+        folders={folders}
         activeSessionId={activeSessionId}
         onSessionSelect={handleSessionSelect}
         onNewChat={handleNewChat}
         onClearHistory={handleClearHistory}
+        onRenameSession={handleRenameSession}
+        onDeleteSession={handleDeleteSession}
+        onCreateFolder={handleCreateFolder}
+        onRenameFolder={handleRenameFolder}
+        onDeleteFolder={handleDeleteFolder}
+        onMoveSessionToFolder={handleMoveSessionToFolder}
         isInModal={isInModal}
       />
       <div className="flex-1 flex flex-col min-h-0">
@@ -363,6 +558,11 @@ export default function Chat({
             {activeSession?.title || 'New Chat'}
           </h2>
           <div className="flex items-center gap-4">
+            {backgroundInferenceWarning && (
+              <div className="max-w-sm rounded-xl border border-amber-200/80 bg-amber-100/65 px-3 py-2 text-xs font-medium text-amber-900 shadow-sm backdrop-blur-sm">
+                {backgroundInferenceWarning}
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <label htmlFor="model-select" className="text-sm text-gray-600">
                 Model:

@@ -7,6 +7,8 @@ import { DockerService } from '#services/docker_service'
 import { ZimService } from '#services/zim_service'
 import { MapService } from '#services/map_service'
 import { EmbedFileJob } from './embed_file_job.js'
+import { dirname, join } from 'path'
+import axios from 'axios'
 
 export class RunDownloadJob {
   static get queue() {
@@ -25,89 +27,123 @@ export class RunDownloadJob {
     const { url, filepath, timeout, allowedMimeTypes, forceNew, filetype, resourceMetadata } =
       job.data as RunDownloadJobParams
 
-    await doResumableDownload({
-      url,
-      filepath,
-      timeout,
-      allowedMimeTypes,
-      forceNew,
-      onProgress(progress) {
-        const progressPercent = (progress.downloadedBytes / (progress.totalBytes || 1)) * 100
-        job.updateProgress(Math.floor(progressPercent))
-      },
-      async onComplete(url) {
-        try {
-          // Create InstalledResource entry if metadata was provided
-          if (resourceMetadata) {
-            const { default: InstalledResource } = await import('#models/installed_resource')
-            const { DateTime } = await import('luxon')
-            const { getFileStatsIfExists, deleteFileIfExists } = await import('../utils/fs.js')
-            const stats = await getFileStatsIfExists(filepath)
+    const dockerService = new DockerService()
+    const zimService = new ZimService(dockerService)
+    let effectiveUrl = url
+    let effectiveFilepath = filepath
+    let effectiveResourceMetadata = resourceMetadata ? { ...resourceMetadata } : undefined
 
-            // Look up the old entry so we can clean up the previous file after updating
-            const oldEntry = await InstalledResource.query()
-              .where('resource_id', resourceMetadata.resource_id)
-              .where('resource_type', filetype as 'zim' | 'map')
-              .first()
-            const oldFilePath = oldEntry?.file_path ?? null
+    const completeDownload = async (completedUrl: string, completedFilePath: string) => {
+      try {
+        if (effectiveResourceMetadata) {
+          const { default: InstalledResource } = await import('#models/installed_resource')
+          const { DateTime } = await import('luxon')
+          const { getFileStatsIfExists, deleteFileIfExists } = await import('../utils/fs.js')
+          const stats = await getFileStatsIfExists(completedFilePath)
 
-            await InstalledResource.updateOrCreate(
-              { resource_id: resourceMetadata.resource_id, resource_type: filetype as 'zim' | 'map' },
-              {
-                version: resourceMetadata.version,
-                collection_ref: resourceMetadata.collection_ref,
-                url: url,
-                file_path: filepath,
-                file_size_bytes: stats ? Number(stats.size) : null,
-                installed_at: DateTime.now(),
-              }
-            )
+          const oldEntry = await InstalledResource.query()
+            .where('resource_id', effectiveResourceMetadata.resource_id)
+            .where('resource_type', filetype as 'zim' | 'map')
+            .first()
+          const oldFilePath = oldEntry?.file_path ?? null
 
-            // Delete the old file if it differs from the new one
-            if (oldFilePath && oldFilePath !== filepath) {
-              try {
-                await deleteFileIfExists(oldFilePath)
-                console.log(`[RunDownloadJob] Deleted old file: ${oldFilePath}`)
-              } catch (deleteError) {
-                console.warn(
-                  `[RunDownloadJob] Failed to delete old file ${oldFilePath}:`,
-                  deleteError
-                )
-              }
+          await InstalledResource.updateOrCreate(
+            { resource_id: effectiveResourceMetadata.resource_id, resource_type: filetype as 'zim' | 'map' },
+            {
+              version: effectiveResourceMetadata.version,
+              collection_ref: effectiveResourceMetadata.collection_ref,
+              url: completedUrl,
+              file_path: completedFilePath,
+              file_size_bytes: stats ? Number(stats.size) : null,
+              installed_at: DateTime.now(),
             }
-          }
-
-          if (filetype === 'zim') {
-            const dockerService = new DockerService()
-            const zimService = new ZimService(dockerService)
-            await zimService.downloadRemoteSuccessCallback([url], true)
-
-            // Dispatch an embedding job for the downloaded ZIM file
-            try {
-              await EmbedFileJob.dispatch({
-                fileName: url.split('/').pop() || '',
-                filePath: filepath,
-              })
-            } catch (error) {
-              console.error(`[RunDownloadJob] Error dispatching EmbedFileJob for URL ${url}:`, error)
-            }
-          } else if (filetype === 'map') {
-            const mapsService = new MapService()
-            await mapsService.downloadRemoteSuccessCallback([url], false)
-          }
-        } catch (error) {
-          console.error(
-            `[RunDownloadJob] Error in download success callback for URL ${url}:`,
-            error
           )
+
+          if (oldFilePath && oldFilePath !== completedFilePath) {
+            try {
+              await deleteFileIfExists(oldFilePath)
+              console.log(`[RunDownloadJob] Deleted old file: ${oldFilePath}`)
+            } catch (deleteError) {
+              console.warn(`[RunDownloadJob] Failed to delete old file ${oldFilePath}:`, deleteError)
+            }
+          }
         }
-        job.updateProgress(100)
-      },
-    })
+
+        if (filetype === 'zim') {
+          await zimService.downloadRemoteSuccessCallback([completedUrl], true)
+
+          try {
+            await EmbedFileJob.dispatch({
+              fileName: completedUrl.split('/').pop() || '',
+              filePath: completedFilePath,
+            })
+          } catch (error) {
+            console.error(`[RunDownloadJob] Error dispatching EmbedFileJob for URL ${completedUrl}:`, error)
+          }
+        } else if (filetype === 'map') {
+          const mapsService = new MapService()
+          await mapsService.downloadRemoteSuccessCallback([completedUrl], false)
+        }
+      } catch (error) {
+        console.error(`[RunDownloadJob] Error in download success callback for URL ${completedUrl}:`, error)
+      }
+      await job.updateProgress(100)
+    }
+
+    const runDownloadOnce = async () =>
+      doResumableDownload({
+        url: effectiveUrl,
+        filepath: effectiveFilepath,
+        timeout,
+        allowedMimeTypes,
+        forceNew,
+        onProgress(progress) {
+          const progressPercent = (progress.downloadedBytes / (progress.totalBytes || 1)) * 100
+          job.updateProgress(Math.floor(progressPercent))
+        },
+        onComplete: () => completeDownload(effectiveUrl, effectiveFilepath),
+      })
+
+    try {
+      await runDownloadOnce()
+    } catch (error) {
+      const status = axios.isAxiosError(error) ? error.response?.status : undefined
+      const canResolveMovedSource = filetype === 'zim' && status === 404
+
+      if (!canResolveMovedSource) {
+        throw error
+      }
+
+      const resolved = await zimService.resolveRemoteDownloadTarget(
+        effectiveUrl,
+        effectiveResourceMetadata?.resource_id,
+        effectiveResourceMetadata?.version
+      )
+
+      if (!resolved.changed) {
+        throw error
+      }
+
+      effectiveUrl = resolved.url
+      effectiveFilepath = join(dirname(effectiveFilepath), resolved.filename)
+      if (effectiveResourceMetadata && resolved.version) {
+        effectiveResourceMetadata.version = resolved.version
+      }
+
+      await job.updateData({
+        ...job.data,
+        url: effectiveUrl,
+        filepath: effectiveFilepath,
+        resourceMetadata: effectiveResourceMetadata,
+        status: 'resolved_source_moved',
+      })
+
+      await runDownloadOnce()
+    }
 
     return {
-      url,
-      filepath,
+      url: effectiveUrl,
+      filepath: effectiveFilepath,
     }
   }
 

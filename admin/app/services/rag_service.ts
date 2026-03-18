@@ -28,14 +28,14 @@ export class RagService {
   public static EMBEDDING_MODEL = 'nomic-embed-text:v1.5'
   public static EMBEDDING_DIMENSION = 768 // Nomic Embed Text v1.5 dimension is 768
   public static MODEL_CONTEXT_LENGTH = 2048 // nomic-embed-text has 2K token context
-  public static MAX_SAFE_TOKENS = 1800 // Leave buffer for prefix and tokenization variance
-  public static TARGET_TOKENS_PER_CHUNK = 1700 // Target 1700 tokens per chunk for embedding
+  public static MAX_SAFE_TOKENS = 1200 // Conservative cap to avoid embed context overruns on small devices
+  public static TARGET_TOKENS_PER_CHUNK = 900 // Keep chunks smaller than the nominal model window for stability
   public static PREFIX_TOKEN_BUDGET = 10 // Reserve ~10 tokens for prefixes
-  public static CHAR_TO_TOKEN_RATIO = 3 // Approximate chars per token
+  public static CHAR_TO_TOKEN_RATIO = 2 // Conservative chars/token estimate to reduce overflow risk
   // Nomic Embed Text v1.5 uses task-specific prefixes for optimal performance
   public static SEARCH_DOCUMENT_PREFIX = 'search_document: '
   public static SEARCH_QUERY_PREFIX = 'search_query: '
-  public static EMBEDDING_BATCH_SIZE = 8 // Conservative batch size for low-end hardware
+  public static EMBEDDING_BATCH_SIZE = 2 // Keep embed latency and memory pressure reasonable on Pi-class hardware
 
   constructor(
     private dockerService: DockerService,
