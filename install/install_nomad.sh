@@ -314,7 +314,7 @@ show_nomad_radiolist() {
     whiptail \
       --backtitle "$(nomad_backtitle)" \
       --title "${title}" \
-      --radiolist "${message}" 22 100 12 "$@" 6>&1 1>&4 2>&5 <&3
+      --radiolist "${message}" 22 100 12 "$@" 6>&1 1>&4 2>&6 <&3
     return $?
   fi
 
@@ -614,6 +614,13 @@ ensure_raspberry_pi_4k_kernel_prerequisites() {
   exit 0
 }
 
+nvidia_cuda_stack_looks_ready() {
+  command -v nvidia-smi >/dev/null 2>&1 \
+    && nvidia-smi >/dev/null 2>&1 \
+    && command -v nvcc >/dev/null 2>&1 \
+    && nvcc --version 2>/dev/null | grep -q "release 13.0"
+}
+
 ensure_raspberry_pi_nvidia_prerequisites() {
   if [[ "${target_platform}" != 'raspberry-pi' ]]; then
     return 0
@@ -634,6 +641,17 @@ ensure_raspberry_pi_nvidia_prerequisites() {
   if [[ "${enable_ai_runtime}" == 'false' ]]; then
     echo -e "${YELLOW}#${RESET} Skipping optional NVIDIA/CUDA runtime setup for this install.\\n"
     return 0
+  fi
+
+  if has_nvidia_pci_device && nvidia_cuda_stack_looks_ready; then
+    if show_nomad_yesno \
+      "AI Runtime Already Present" \
+      "A working NVIDIA/CUDA host toolstack already appears to be installed on this Pi.\n\nThe installer can reuse the current setup, or force a reinstall of the NVIDIA/CUDA runtime components." \
+      "Reuse Existing" \
+      "Force Reinstall"; then
+      echo -e "${GREEN}#${RESET} Reusing the existing NVIDIA/CUDA host runtime."
+      return 0
+    fi
   fi
 
   ensure_raspberry_pi_4k_kernel_prerequisites
