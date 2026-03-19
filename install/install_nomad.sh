@@ -82,6 +82,13 @@ reset_existing_mysql='false'
 external_device=''
 external_mount="${NOMAD_EXTERNAL_MOUNT_DEFAULT}"
 external_label="${NOMAD_EXTERNAL_LABEL_DEFAULT}"
+use_external_storage='auto'
+swap_device=''
+swap_mount='/mnt/usb-swap'
+swap_label='nomad-swap'
+swap_file_path=''
+swap_size_gib="${NOMAD_SWAP_SIZE_GIB:-16}"
+use_external_swap='auto'
 nomad_data_root=''
 source_repo_dir=''
 install_secrets_file=''
@@ -185,10 +192,9 @@ ensure_dependencies_installed() {
     missing_deps+=("curl")
   fi
 
-  # Check for whiptail (used for dialogs, though not currently active)
-  # if ! command -v whiptail &> /dev/null; then
-  #   missing_deps+=("whiptail")
-  # fi
+  if ! command -v whiptail &> /dev/null; then
+    missing_deps+=("whiptail")
+  fi
 
   if [[ ${#missing_deps[@]} -gt 0 ]]; then
     echo -e "${YELLOW}#${RESET} Installing required dependencies: ${missing_deps[*]}...\\n"
@@ -206,6 +212,84 @@ ensure_dependencies_installed() {
   else
     echo -e "${GREEN}#${RESET} All required dependencies are already installed.\\n"
   fi
+}
+
+installer_tui_available() {
+  [[ "${assume_yes}" != 'true' ]] && [[ -t 0 && -t 1 ]] && command -v whiptail >/dev/null 2>&1
+}
+
+nomad_backtitle() {
+  echo "Project N.O.M.A.D. | Offline-first install wizard"
+}
+
+show_nomad_msgbox() {
+  local title="$1"
+  local message="$2"
+
+  if installer_tui_available; then
+    whiptail --backtitle "$(nomad_backtitle)" --title "${title}" --msgbox "${message}" 18 78
+    return $?
+  fi
+
+  echo
+  header
+  echo -e "${GREEN}${title}${RESET}"
+  echo
+  echo -e "${message}"
+  echo
+}
+
+show_nomad_yesno() {
+  local title="$1"
+  local message="$2"
+  local yes_label="${3:-Yes}"
+  local no_label="${4:-No}"
+
+  if installer_tui_available; then
+    whiptail \
+      --backtitle "$(nomad_backtitle)" \
+      --title "${title}" \
+      --yes-button "${yes_label}" \
+      --no-button "${no_label}" \
+      --yesno "${message}" 18 78
+    return $?
+  fi
+
+  read -r -p "${message} (${yes_label}/${no_label}): " choice
+  [[ "${choice}" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]
+}
+
+show_nomad_radiolist() {
+  local title="$1"
+  local message="$2"
+  shift 2
+
+  if installer_tui_available; then
+    whiptail \
+      --backtitle "$(nomad_backtitle)" \
+      --title "${title}" \
+      --radiolist "${message}" 22 100 12 "$@" 3>&1 1>&2 2>&3
+    return $?
+  fi
+
+  local tags=()
+  local index=1
+  while [[ $# -gt 0 ]]; do
+    printf "  %s) %s\n" "${index}" "$2"
+    tags+=("$1")
+    shift 3
+    index=$((index + 1))
+  done
+
+  local selection=''
+  read -r -p "Enter selection [1]: " selection
+  selection="${selection:-1}"
+  if [[ "${selection}" =~ ^[0-9]+$ ]] && (( selection >= 1 && selection <= ${#tags[@]} )); then
+    echo "${tags[$((selection - 1))]}"
+    return 0
+  fi
+
+  return 1
 }
 
 detect_target_platform() {
@@ -691,6 +775,45 @@ device_filesystem_type() {
   sudo blkid -s TYPE -o value "${device_path}" 2>/dev/null || true
 }
 
+list_external_partition_candidates() {
+  lsblk -rno PATH,TYPE,FSTYPE,LABEL,MOUNTPOINT,SIZE,RM,TRAN | awk '$2 == "part" { printf "%s|%s|%s|%s|%s|%s|%s\n", $1, $3, $4, $5, $6, $7, $8 }'
+}
+
+device_contains_zim_files() {
+  local device_path="$1"
+  local fstype=''
+  fstype="$(device_filesystem_type "${device_path}")"
+  [[ "${fstype}" == 'ext4' ]] || return 1
+
+  local mountpoint=''
+  mountpoint="$(device_mountpoint "${device_path}")"
+  local temp_mount=''
+  local mounted_here='false'
+
+  if [[ -z "${mountpoint}" ]]; then
+    temp_mount="$(mktemp -d)"
+    if sudo mount -o ro "${device_path}" "${temp_mount}" >/dev/null 2>&1; then
+      mountpoint="${temp_mount}"
+      mounted_here='true'
+    else
+      rmdir "${temp_mount}" >/dev/null 2>&1 || true
+      return 1
+    fi
+  fi
+
+  local found='false'
+  if find "${mountpoint}" -path '*/project-nomad/storage/zim/*.zim' -o -path '*/project-nomad/storage/zim/content/*.zim' 2>/dev/null | read -r _; then
+    found='true'
+  fi
+
+  if [[ "${mounted_here}" == 'true' ]]; then
+    sudo umount "${temp_mount}" >/dev/null 2>&1 || true
+    rmdir "${temp_mount}" >/dev/null 2>&1 || true
+  fi
+
+  [[ "${found}" == 'true' ]]
+}
+
 device_looks_like_nomad_data() {
   local device_path="$1"
   local detected_label=''
@@ -829,8 +952,13 @@ ensure_safe_boot_order() {
 }
 
 refresh_nomad_data_root() {
-  nomad_data_root="${external_mount}/project-nomad"
+  if [[ "${use_external_storage}" == 'false' ]]; then
+    nomad_data_root="${NOMAD_DIR}"
+  else
+    nomad_data_root="${external_mount}/project-nomad"
+  fi
   install_secrets_file="${nomad_data_root}/install-secrets.env"
+  swap_file_path="${swap_mount}/swapfile"
 }
 
 directory_has_files() {
@@ -1003,15 +1131,7 @@ confirm_action() {
     return 0
   fi
 
-  read -r -p "${prompt} (y/N): " choice
-  case "${choice}" in
-    y|Y|yes|YES)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  show_nomad_yesno "Project N.O.M.A.D." "${prompt}" "Continue" "Cancel"
 }
 
 select_external_device_interactively() {
@@ -1021,7 +1141,7 @@ select_external_device_interactively() {
   local recommended_selection=''
   root_device="$(get_root_block_device)"
 
-  candidate_output="$(lsblk -rno PATH,TYPE,FSTYPE,LABEL,MOUNTPOINT,SIZE | awk '$2 == "part" { printf "%s|%s|%s|%s|%s\n", $1, $3, $4, $5, $6 }')"
+  candidate_output="$(list_external_partition_candidates)"
 
   while IFS= read -r line; do
     [[ -z "${line}" ]] && continue
@@ -1034,16 +1154,27 @@ select_external_device_interactively() {
   done <<< "${candidate_output}"
 
   if [[ ${#candidates[@]} -eq 0 ]]; then
+    if show_nomad_yesno \
+      "Storage Setup" \
+      "No external data partition was detected.\n\nProject N.O.M.A.D. can continue using the local system disk, but large ZIM libraries and AI models will live on the TF/SD card.\n\nContinue with local storage only?" \
+      "Use Local" \
+      "Cancel"; then
+      use_external_storage='false'
+      external_device=''
+      return 0
+    fi
+
     echo -e "${RED}#${RESET} No external partition candidates were detected."
     echo -e "${YELLOW}#${RESET} Connect and partition the target USB disk first, or pass ${WHITE_R}--external-device /dev/sdX1${RESET}."
     exit 1
   fi
 
-  echo -e "${YELLOW}#${RESET} Select the external partition to use for Project N.O.M.A.D data:"
-  local index=1
+  local options=(
+    "LOCAL" "Use only local TF/SD storage for Nomad data" "OFF"
+  )
   local entry=''
   for entry in "${candidates[@]}"; do
-    IFS='|' read -r dev fstype label mountpoint size <<< "${entry}"
+    IFS='|' read -r dev fstype label mountpoint size rm_flag transport <<< "${entry}"
     local notes=()
     local recommendation='false'
     if device_hosts_active_swap "${dev}"; then
@@ -1060,42 +1191,189 @@ select_external_device_interactively() {
       notes+=("existing-nomad-data")
       recommendation='true'
     fi
-    printf "  %s) %s size=%s fstype=%s label=%s mount=%s" \
-      "${index}" "${dev}" "${size:-<unknown>}" "${fstype:-<none>}" "${label:-<none>}" "${mountpoint:-<none>}"
+    if device_contains_zim_files "${dev}"; then
+      notes+=("zim-files")
+      recommendation='true'
+    fi
+    if [[ "${rm_flag}" == '1' ]]; then
+      notes+=("removable")
+    fi
+    if [[ -n "${transport}" ]]; then
+      notes+=("${transport}")
+    fi
+    local description="${dev} | ${size:-<unknown>} | fs=${fstype:-<none>} | label=${label:-<none>} | mount=${mountpoint:-<none>}"
     if [[ ${#notes[@]} -gt 0 ]]; then
-      printf " notes=%s" "$(IFS=,; echo "${notes[*]}")"
+      description="${description} | $(IFS=,; echo "${notes[*]}")"
     fi
-    printf "\n"
+    local state='OFF'
     if [[ -z "${recommended_selection}" && "${recommendation}" == 'true' && ! " ${notes[*]} " =~ " active-swap " ]]; then
-      recommended_selection="${index}"
+      recommended_selection="${dev}"
+      state='ON'
     fi
-    index=$((index + 1))
+    options+=("${dev}" "${description}" "${state}")
   done
 
-  if [[ -n "${root_device}" ]]; then
-    echo -e "${YELLOW}#${RESET} System boot/root device detected as ${WHITE_R}${root_device}${RESET}. It is excluded from selection."
-  fi
-  echo -e "${YELLOW}#${RESET} Partitions with active swap should not be selected."
-  if [[ -n "${recommended_selection}" ]]; then
-    echo -e "${GREEN}#${RESET} Recommended selection: ${WHITE_R}${recommended_selection}${RESET} (existing Nomad recovery data detected)."
+  if [[ -z "${recommended_selection}" ]]; then
+    options[2]='ON'
   fi
 
   local selection=''
-  while true; do
-    if [[ -n "${recommended_selection}" ]]; then
-      read -r -p "Enter selection number [${recommended_selection}]: " selection
-      selection="${selection:-${recommended_selection}}"
-    else
-      read -r -p "Enter selection number: " selection
-    fi
-    if [[ "${selection}" =~ ^[0-9]+$ ]] && (( selection >= 1 && selection <= ${#candidates[@]} )); then
-      external_device="$(echo "${candidates[$((selection - 1))]}" | cut -d'|' -f1)"
-      break
-    fi
-    echo -e "${YELLOW}#${RESET} Invalid selection. Choose a number from the list above."
-  done
+  selection="$(show_nomad_radiolist \
+    "Storage Setup" \
+    "Choose where Project N.O.M.A.D should store its large data.\n\nUse arrow keys and Space to select. Existing Nomad data and ZIM libraries are marked when detected.\n\nSystem disk: ${root_device:-<unknown>}" \
+    "${options[@]}")" || exit 1
 
+  if [[ "${selection}" == 'LOCAL' ]]; then
+    use_external_storage='false'
+    external_device=''
+    echo -e "${YELLOW}#${RESET} User chose local-only storage. Large datasets and models will stay on the system disk."
+    return 0
+  fi
+
+  use_external_storage='true'
+  external_device="${selection}"
   echo -e "${GREEN}#${RESET} Selected external device: ${WHITE_R}${external_device}${RESET}\\n"
+}
+
+configure_local_storage() {
+  use_external_storage='false'
+  refresh_nomad_data_root
+  sudo mkdir -p "${NOMAD_DIR}/storage/logs" "${NOMAD_DIR}/mysql" "${NOMAD_DIR}/redis"
+  sudo touch "${NOMAD_DIR}/storage/logs/admin.log"
+  echo -e "${YELLOW}#${RESET} Project N.O.M.A.D will use local storage under ${WHITE_R}${NOMAD_DIR}${RESET}."
+  echo -e "${YELLOW}#${RESET} This is simpler, but large ZIM collections and Ollama models will use TF/SD storage.\\n"
+}
+
+select_swap_device_interactively() {
+  local candidates=()
+  local candidate_output=''
+  candidate_output="$(list_external_partition_candidates)"
+
+  while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    local candidate_device=''
+    candidate_device="$(echo "${line}" | cut -d'|' -f1)"
+    if device_is_system_disk "${candidate_device}"; then
+      continue
+    fi
+    if [[ -n "${external_device}" && "${candidate_device}" == "${external_device}" ]]; then
+      continue
+    fi
+    candidates+=("${line}")
+  done <<< "${candidate_output}"
+
+  if [[ ${#candidates[@]} -eq 0 ]]; then
+    use_external_swap='false'
+    return 0
+  fi
+
+  if ! show_nomad_yesno \
+    "Swap Setup" \
+    "A separate USB stick can be used for supplemental swap.\n\nOn low-memory ARM inference systems this can help absorb memory pressure better than relying only on the default OS swap path on the TF/SD card.\n\nDo you want Project N.O.M.A.D. to configure supplemental USB-backed swap?" \
+    "Choose Device" \
+    "Keep System Swap"; then
+    use_external_swap='false'
+    return 0
+  fi
+
+  local options=(
+    "SYSTEM" "Keep the current OS swap layout only" "OFF"
+  )
+  local recommended='SYSTEM'
+  local entry=''
+  for entry in "${candidates[@]}"; do
+    IFS='|' read -r dev fstype label mountpoint size rm_flag transport <<< "${entry}"
+    local notes=()
+    if device_hosts_active_swap "${dev}"; then
+      notes+=("active-swap")
+    fi
+    if [[ "${rm_flag}" == '1' ]]; then
+      notes+=("removable")
+    fi
+    if [[ -n "${transport}" ]]; then
+      notes+=("${transport}")
+    fi
+    local state='OFF'
+    if [[ "${recommended}" == 'SYSTEM' && "${rm_flag}" == '1' && "${fstype}" != '' ]]; then
+      recommended="${dev}"
+      state='ON'
+    fi
+    local description="${dev} | ${size:-<unknown>} | fs=${fstype:-<none>} | label=${label:-<none>} | mount=${mountpoint:-<none>}"
+    if [[ ${#notes[@]} -gt 0 ]]; then
+      description="${description} | $(IFS=,; echo "${notes[*]}")"
+    fi
+    options+=("${dev}" "${description}" "${state}")
+  done
+  if [[ "${recommended}" == 'SYSTEM' ]]; then
+    options[2]='ON'
+  fi
+
+  local selection=''
+  selection="$(show_nomad_radiolist \
+    "Swap Setup" \
+    "Choose the device for supplemental swap.\n\nUse a dedicated USB stick if available. Do not use the Nomad data disk for swap." \
+    "${options[@]}")" || exit 1
+
+  if [[ "${selection}" == 'SYSTEM' ]]; then
+    use_external_swap='false'
+    return 0
+  fi
+
+  use_external_swap='true'
+  swap_device="${selection}"
+}
+
+configure_optional_swap_device() {
+  if [[ "${use_external_swap}" == 'auto' ]]; then
+    select_swap_device_interactively
+  fi
+
+  if [[ "${use_external_swap}" != 'true' || -z "${swap_device}" ]]; then
+    echo -e "${YELLOW}#${RESET} Keeping the current OS swap layout."
+    return 0
+  fi
+
+  if [[ ! -b "${swap_device}" ]]; then
+    echo -e "${RED}#${RESET} Swap device ${WHITE_R}${swap_device}${RESET} was not found."
+    exit 1
+  fi
+
+  local current_fstype=''
+  current_fstype="$(device_filesystem_type "${swap_device}")"
+  if [[ "${current_fstype}" != 'ext4' ]]; then
+    if ! confirm_action "Format ${swap_device} as ext4 for supplemental swap? Existing data on that partition will be lost"; then
+      echo -e "${YELLOW}#${RESET} Supplemental swap was skipped."
+      use_external_swap='false'
+      return 0
+    fi
+    sudo mkfs.ext4 -F -L "${swap_label}" "${swap_device}"
+  fi
+
+  local swap_uuid=''
+  swap_uuid="$(sudo blkid -s UUID -o value "${swap_device}")"
+  [[ -n "${swap_uuid}" ]] || { echo -e "${RED}#${RESET} Unable to determine UUID for ${swap_device}."; exit 1; }
+
+  sudo mkdir -p "${swap_mount}"
+  if grep -qsE "[[:space:]]${swap_mount//\//\\/}[[:space:]]" /etc/fstab; then
+    sudo cp /etc/fstab "/etc/fstab.project-nomad-rpi.swap.bak"
+    sudo awk -v mountpoint="${swap_mount}" '$2 != mountpoint { print }' /etc/fstab | sudo tee /etc/fstab >/dev/null
+  fi
+  echo "UUID=${swap_uuid} ${swap_mount} ext4 defaults,noatime 0 2" | sudo tee -a /etc/fstab >/dev/null
+  sudo mount "${swap_mount}" 2>/dev/null || sudo mount -a
+
+  refresh_nomad_data_root
+  if [[ ! -f "${swap_file_path}" ]]; then
+    sudo fallocate -l "${swap_size_gib}G" "${swap_file_path}" 2>/dev/null || sudo dd if=/dev/zero of="${swap_file_path}" bs=1M count="$((swap_size_gib * 1024))" status=progress
+    sudo chmod 600 "${swap_file_path}"
+    sudo mkswap "${swap_file_path}" >/dev/null
+  fi
+
+  if ! grep -qsF "${swap_file_path}" /etc/fstab; then
+    echo "${swap_file_path} none swap sw 0 0" | sudo tee -a /etc/fstab >/dev/null
+  fi
+
+  sudo swapon "${swap_file_path}" 2>/dev/null || true
+  echo -e "${GREEN}#${RESET} Supplemental swap is configured at ${WHITE_R}${swap_file_path}${RESET}.\\n"
 }
 
 configure_external_storage() {
@@ -1103,6 +1381,11 @@ configure_external_storage() {
 
   if [[ -z "${external_device}" ]]; then
     select_external_device_interactively
+  fi
+
+  if [[ "${use_external_storage}" == 'false' ]]; then
+    configure_local_storage
+    return 0
   fi
 
   if [[ ! -b "${external_device}" ]]; then
@@ -1130,26 +1413,43 @@ configure_external_storage() {
     device_contains_nomad_data='true'
   fi
 
+  if [[ "${format_external_disk}" != 'true' && "${current_fstype}" != 'ext4' ]]; then
+    if confirm_action "External storage ${external_device} is ${current_fstype:-unknown}. Format it as ext4 for Nomad data now?"; then
+      format_external_disk='true'
+    fi
+  fi
+
   if [[ "${format_external_disk}" == 'true' ]]; then
     if [[ "${device_contains_nomad_data}" == 'true' && "${force_format_existing_nomad_data}" != 'true' ]]; then
-      echo -e "${RED}#${RESET} Refusing to format ${WHITE_R}${external_device}${RESET} because it appears to contain existing Project N.O.M.A.D recovery data."
-      echo -e "${YELLOW}#${RESET} Re-run without ${WHITE_R}--format-external-disk${RESET} to reuse it safely."
-      echo -e "${YELLOW}#${RESET} Only use ${WHITE_R}--force-format-existing-nomad-data${RESET} if you intentionally want to wipe that recovery disk."
-      exit 1
+      if show_nomad_yesno \
+        "Recovery Data Detected" \
+        "The selected drive appears to contain existing Project N.O.M.A.D. recovery data, and possibly ZIM libraries or prior service state.\n\nFormatting it will destroy that data.\n\nDo you really want to wipe it?" \
+        "Wipe It" \
+        "Keep Data"; then
+        force_format_existing_nomad_data='true'
+      else
+        echo -e "${YELLOW}#${RESET} Preserving existing Project N.O.M.A.D. recovery data on ${WHITE_R}${external_device}${RESET}."
+        format_external_disk='false'
+      fi
     fi
-    if ! confirm_action "Format ${external_device} as ext4 and mount it at ${external_mount}? Existing data on that partition will be lost"; then
+    if [[ "${format_external_disk}" == 'true' ]] && ! confirm_action "Format ${external_device} as ext4 and mount it at ${external_mount}? Existing data on that partition will be lost"; then
       echo -e "${RED}#${RESET} External storage formatting was cancelled."
       exit 1
     fi
   elif [[ "${current_fstype}" != 'ext4' ]]; then
     echo -e "${RED}#${RESET} External device ${WHITE_R}${external_device}${RESET} is not ext4 (detected: ${WHITE_R}${current_fstype:-unknown}${RESET})."
-    echo -e "${YELLOW}#${RESET} Re-run with ${WHITE_R}--format-external-disk${RESET} if you want the installer to prepare that partition."
+    echo -e "${YELLOW}#${RESET} Native Linux ext4 storage is required for reliable Project N.O.M.A.D data mounts."
     exit 1
   else
     echo -e "${YELLOW}#${RESET} Reusing existing ext4 filesystem on ${WHITE_R}${external_device}${RESET} without formatting."
     if [[ "${device_contains_nomad_data}" == 'true' ]]; then
       echo -e "${GREEN}#${RESET} Existing Project N.O.M.A.D data was detected on ${WHITE_R}${external_device}${RESET}; recovery-safe reuse is enabled."
     fi
+  fi
+
+  if [[ "${format_external_disk}" != 'true' && "${current_fstype}" != 'ext4' ]]; then
+    echo -e "${RED}#${RESET} Cannot continue with ${WHITE_R}${external_device}${RESET} without formatting it to ext4."
+    exit 1
   fi
 
   echo -e "${YELLOW}#${RESET} Preparing external storage device ${WHITE_R}${external_device}${RESET} for Project N.O.M.A.D data...\\n"
@@ -1243,13 +1543,24 @@ print_runtime_preflight_report() {
   if docker_runtime_is_configured; then
     echo "Docker runtime: nvidia available"
   else
-    echo "Docker runtime: nvidia missing"
+  echo "Docker runtime: nvidia missing"
   fi
 
-  echo "External data mount: ${external_mount}"
+  echo "External storage: ${use_external_storage}"
+  if [[ "${use_external_storage}" == 'true' ]]; then
+    echo "External data device: ${external_device:-<unset>}"
+    echo "External data mount: ${external_mount}"
+  else
+    echo "External data mount: local-only"
+  fi
   echo "Nomad data root: ${nomad_data_root}"
+  echo "Supplemental swap: ${use_external_swap}"
+  if [[ "${use_external_swap}" == 'true' ]]; then
+    echo "Swap device: ${swap_device:-<unset>}"
+    echo "Swap path: ${swap_file_path:-<unset>}"
+  fi
 
-  if findmnt -rn "${external_mount}" >/dev/null 2>&1; then
+  if [[ "${use_external_storage}" == 'true' ]] && findmnt -rn "${external_mount}" >/dev/null 2>&1; then
     echo "Nomad data disk free: $(df -Ph "${external_mount}" | awk 'NR==2{print $4 " of " $2}')"
   fi
 
@@ -1317,18 +1628,28 @@ run_runtime_preflight_checks() {
   fi
 
   if [[ "${skip_storage_preflight}" != 'true' ]]; then
-    if ! findmnt -rn "${external_mount}" >/dev/null 2>&1; then
-      record_preflight_failure "External data mount ${external_mount} is not mounted. Select and prepare the external drive before continuing."
-    else
-      local nomad_data_available_kib
-      nomad_data_available_kib="$(df -Pk "${external_mount}" | awk 'NR==2{print $4}')"
-      if [[ -n "${nomad_data_available_kib}" && "${nomad_data_available_kib}" -lt 52428800 ]]; then
-        record_warning "Less than 50 GiB free on ${external_mount}. Large knowledgebase ingestion may stall later."
+    if [[ "${use_external_storage}" == 'true' ]]; then
+      if ! findmnt -rn "${external_mount}" >/dev/null 2>&1; then
+        record_preflight_failure "External data mount ${external_mount} is not mounted. Select and prepare the external drive before continuing."
+      else
+        local nomad_data_available_kib
+        nomad_data_available_kib="$(df -Pk "${external_mount}" | awk 'NR==2{print $4}')"
+        if [[ -n "${nomad_data_available_kib}" && "${nomad_data_available_kib}" -lt 52428800 ]]; then
+          record_warning "Less than 50 GiB free on ${external_mount}. Large knowledgebase ingestion may stall later."
+        fi
       fi
     fi
 
     if [[ ! -d "${nomad_data_root}/storage" || ! -d "${nomad_data_root}/mysql" || ! -d "${nomad_data_root}/redis" ]]; then
-      record_preflight_failure "Nomad data directories are missing under ${nomad_data_root}. External storage preparation did not complete."
+      record_preflight_failure "Nomad data directories are missing under ${nomad_data_root}. Storage preparation did not complete."
+    fi
+
+    if [[ "${use_external_swap}" == 'true' ]]; then
+      if [[ ! -f "${swap_file_path}" ]]; then
+        record_preflight_failure "Supplemental swap was requested, but ${swap_file_path} does not exist."
+      elif ! swapon --noheadings --show=NAME 2>/dev/null | grep -qx "${swap_file_path}"; then
+        record_warning "Supplemental swap file ${swap_file_path} exists but is not currently active."
+      fi
     fi
   fi
 
@@ -1504,16 +1825,17 @@ get_install_confirmation(){
     return 0
   fi
 
-  read -p "This script will install/update Project N.O.M.A.D. and its dependencies on your machine. Are you sure you want to continue? (y/N): " choice
-  case "$choice" in
-    y|Y )
-      echo -e "${GREEN}#${RESET} User chose to continue with the installation."
-      ;;
-    * )
-      echo "User chose not to continue with the installation."
-      exit 0
-      ;;
-  esac
+  if show_nomad_yesno \
+    "Project N.O.M.A.D. Installer" \
+    "This installer will prepare Docker, storage, and optional AI runtime support for Project N.O.M.A.D.\n\nYou will be asked for consent before any disk format or recovery-impacting step.\n\nContinue?" \
+    "Continue" \
+    "Exit"; then
+    echo -e "${GREEN}#${RESET} User chose to continue with the installation."
+    return 0
+  fi
+
+  echo "User chose not to continue with the installation."
+  exit 0
 }
 
 accept_terms() {
@@ -1523,24 +1845,17 @@ accept_terms() {
     return 0
   fi
 
-  printf "\n\n"
-  echo "License Agreement & Terms of Use"
-  echo "__________________________"
-  printf "\n\n"
-  echo "Project N.O.M.A.D. is licensed under the Apache License 2.0. The full license can be found at https://www.apache.org/licenses/LICENSE-2.0 or in the LICENSE file of this repository."
-  printf "\n"
-  echo "By accepting this agreement, you acknowledge that you have read and understood the terms and conditions of the Apache License 2.0 and agree to be bound by them while using Project N.O.M.A.D."
-  echo -e "\n\n"
-  read -p "I have read and accept License Agreement & Terms of Use (y/N)? " choice
-  case "$choice" in
-    y|Y )
-      accepted_terms='true'
-      ;;
-    * )
-      echo "License Agreement & Terms of Use not accepted. Installation cannot continue."
-      exit 1
-      ;;
-  esac
+  if show_nomad_yesno \
+    "License Agreement & Terms" \
+    "Project N.O.M.A.D. is licensed under the Apache License 2.0.\n\nBy continuing, you confirm that you have read and accept the license terms for this software and the bundled installer flow." \
+    "Accept" \
+    "Decline"; then
+    accepted_terms='true'
+    return 0
+  fi
+
+  echo "License Agreement & Terms of Use not accepted. Installation cannot continue."
+  exit 1
 }
 
 create_nomad_directory(){
@@ -1827,7 +2142,12 @@ parse_script_args() {
         ;;
       --external-device)
         external_device="$2"
+        use_external_storage='true'
         shift 2
+        ;;
+      --use-local-storage)
+        use_external_storage='false'
+        shift
         ;;
       --external-mount)
         external_mount="$2"
@@ -1836,6 +2156,15 @@ parse_script_args() {
       --external-label)
         external_label="$2"
         shift 2
+        ;;
+      --swap-device)
+        swap_device="$2"
+        use_external_swap='true'
+        shift 2
+        ;;
+      --keep-system-swap)
+        use_external_swap='false'
+        shift
         ;;
       --source-dir)
         source_repo_dir="$2"
@@ -1890,6 +2219,7 @@ fi
 if [[ "${storage_only}" == 'true' ]]; then
   detect_target_platform
   configure_external_storage
+  configure_optional_swap_device
   run_runtime_preflight_checks
   exit 0
 fi
@@ -1899,6 +2229,7 @@ get_install_confirmation
 accept_terms
 run_platform_runtime_preinstall
 configure_external_storage
+configure_optional_swap_device
 run_runtime_preflight_checks
 get_local_ip
 create_nomad_directory
