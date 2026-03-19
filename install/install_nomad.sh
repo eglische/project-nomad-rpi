@@ -89,6 +89,7 @@ swap_label='nomad-swap'
 swap_file_path=''
 swap_size_gib="${NOMAD_SWAP_SIZE_GIB:-16}"
 use_external_swap='auto'
+enable_ai_runtime='auto'
 nomad_data_root=''
 source_repo_dir=''
 install_secrets_file=''
@@ -481,6 +482,7 @@ install_raspberry_pi_nvidia_driver_stack() {
   ensure_project_runtime_state_dirs
   ensure_custom_nvidia_apt_pin
   ensure_raspberry_pi_nvidia_build_dependencies
+  sudo apt-get install -y pkg-config libvulkan1 >/dev/null 2>&1 || true
 
   local driver_runfile="${NVIDIA_RUNTIME_CACHE_DIR}/NVIDIA-Linux-aarch64-${NVIDIA_DRIVER_VERSION}.run"
   local module_clone_dir="${NVIDIA_RUNTIME_CACHE_DIR}/open-gpu-kernel-modules"
@@ -617,6 +619,23 @@ ensure_raspberry_pi_nvidia_prerequisites() {
     return 0
   fi
 
+  if [[ "${enable_ai_runtime}" == 'auto' ]] && has_nvidia_pci_device; then
+    if show_nomad_yesno \
+      "AI Runtime Setup" \
+      "An NVIDIA GPU was detected on this Raspberry Pi.\n\nProject N.O.M.A.D. can install the optional CUDA/NVIDIA toolstack for GPU-accelerated Ollama inference.\n\nSkip this if you do not plan to use the AI Assistant or GPU-backed inference on this machine." \
+      "Install AI Runtime" \
+      "Skip AI Runtime"; then
+      enable_ai_runtime='true'
+    else
+      enable_ai_runtime='false'
+    fi
+  fi
+
+  if [[ "${enable_ai_runtime}" == 'false' ]]; then
+    echo -e "${YELLOW}#${RESET} Skipping optional NVIDIA/CUDA runtime setup for this install.\\n"
+    return 0
+  fi
+
   ensure_raspberry_pi_4k_kernel_prerequisites
   ensure_project_runtime_state_dirs
   ensure_custom_nvidia_apt_pin
@@ -681,37 +700,23 @@ generateRandomPass() {
 ensure_docker_installed() {
   if ! command -v docker &> /dev/null; then
     echo -e "${YELLOW}#${RESET} Docker not found. Installing Docker...\\n"
-    
-    # Update package database
+
     sudo apt-get update
-    
-    # Install prerequisites
-    sudo apt-get install -y ca-certificates curl
-    
-    # Create directory for keyrings
-    # sudo install -m 0755 -d /etc/apt/keyrings
-    
-    # # Download Docker's official GPG key
-    # sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-    # sudo chmod a+r /etc/apt/keyrings/docker.asc
+    sudo apt-get install -y ca-certificates curl gnupg
 
-    # # Add the repository to Apt sources
-    # echo \
-    #   "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
-    #   $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-    #   sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    sudo install -m 0755 -d /etc/apt/keyrings
+    sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+    sudo chmod a+r /etc/apt/keyrings/docker.asc
 
-    # # Update the package database with the Docker packages from the newly added repo
-    # sudo apt-get update
+    local docker_codename=''
+    docker_codename="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
+    echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${docker_codename} stable" | \
+      sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-    # # Install Docker packages
-    # sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-    # Download the Docker convenience script
-    curl -fsSL https://get.docker.com -o get-docker.sh
-
-    # Run the Docker installation script
-    sudo sh get-docker.sh
+    sudo apt-get update
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
     # Check if Docker was installed successfully
     if ! command -v docker &> /dev/null; then
@@ -2214,6 +2219,14 @@ parse_script_args() {
         ;;
       --keep-system-swap)
         use_external_swap='false'
+        shift
+        ;;
+      --enable-ai-runtime)
+        enable_ai_runtime='true'
+        shift
+        ;;
+      --skip-ai-runtime)
+        enable_ai_runtime='false'
         shift
         ;;
       --source-dir)
