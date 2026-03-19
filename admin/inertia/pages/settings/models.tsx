@@ -1,5 +1,5 @@
 import { Head, router, usePage } from '@inertiajs/react'
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import StyledTable from '~/components/StyledTable'
 import SettingsLayout from '~/layouts/SettingsLayout'
 import { NomadOllamaModel } from '../../../types/ollama'
@@ -21,6 +21,26 @@ import useDebounce from '~/hooks/useDebounce'
 import ActiveModelDownloads from '~/components/ActiveModelDownloads'
 import { useSystemInfo } from '~/hooks/useSystemInfo'
 
+function SettingsCard({
+  title,
+  description,
+  children,
+}: {
+  title: string
+  description: string
+  children: React.ReactNode
+}) {
+  return (
+    <div className="rounded-lg border-2 border-gray-200 bg-white p-6">
+      <div className="mb-4">
+        <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
+        <p className="mt-1 text-sm text-gray-500">{description}</p>
+      </div>
+      <div className="space-y-4">{children}</div>
+    </div>
+  )
+}
+
 export default function ModelsPage(props: {
   models: {
     availableModels: NomadOllamaModel[]
@@ -28,8 +48,14 @@ export default function ModelsPage(props: {
     settings: {
       chatSuggestionsEnabled: boolean
       aiAssistantCustomName: string
+      aiAssistantContextPrompt: string
       prewarmOnBoot: boolean
       keepModelWarm: boolean
+      defaultChatModel: string
+      prewarmDefaultChatModel: boolean
+      helperTextModel: string
+      helperEmbeddingModel: string
+      prewarmHelperModels: boolean
     }
   }
 }) {
@@ -104,6 +130,16 @@ export default function ModelsPage(props: {
   const [aiAssistantCustomName, setAiAssistantCustomName] = useState(
     props.models.settings.aiAssistantCustomName
   )
+  const [aiAssistantContextPrompt, setAiAssistantContextPrompt] = useState(
+    props.models.settings.aiAssistantContextPrompt
+  )
+  const [defaultChatModel, setDefaultChatModel] = useState(props.models.settings.defaultChatModel)
+  const [prewarmDefaultChatModel, setPrewarmDefaultChatModel] = useState(
+    props.models.settings.prewarmDefaultChatModel
+  )
+  const [helperTextModel, setHelperTextModel] = useState(props.models.settings.helperTextModel)
+  const [helperEmbeddingModel, setHelperEmbeddingModel] = useState(props.models.settings.helperEmbeddingModel)
+  const [prewarmHelperModels, setPrewarmHelperModels] = useState(props.models.settings.prewarmHelperModels)
 
   const [query, setQuery] = useState('')
   const [queryUI, setQueryUI] = useState('')
@@ -115,6 +151,14 @@ export default function ModelsPage(props: {
 
   const forceRefreshRef = useRef(false)
   const [isForceRefreshing, setIsForceRefreshing] = useState(false)
+  const textModels = useMemo(
+    () => props.models.installedModels.filter((model) => !model.name.includes('embed')),
+    [props.models.installedModels]
+  )
+  const embeddingModels = useMemo(
+    () => props.models.installedModels.filter((model) => model.name.includes('embed')),
+    [props.models.installedModels]
+  )
 
   const { data: availableModelData, isFetching, refetch } = useQuery({
     queryKey: ['ollama', 'availableModels', query, limit],
@@ -162,6 +206,10 @@ export default function ModelsPage(props: {
         type: 'error',
       })
     }
+  }
+
+  async function handleInstallRecommendedEmbeddingModel() {
+    await handleInstallModel('nomic-embed-text:v1.5')
   }
 
   async function handleDeleteModel(modelName: string) {
@@ -266,8 +314,11 @@ export default function ModelsPage(props: {
           )}
 
           <StyledSectionHeader title="Settings" className="mt-8 mb-4" />
-          <div className="bg-white rounded-lg border-2 border-gray-200 p-6">
-            <div className="space-y-4">
+          <div className="space-y-6">
+            <SettingsCard
+              title="Chat Model"
+              description="Choose the main inference model for chat and control how aggressively Nomad keeps it ready."
+            >
               <Switch
                 checked={chatSuggestionsEnabled}
                 onChange={(newVal) => {
@@ -277,14 +328,43 @@ export default function ModelsPage(props: {
                 label="Chat Suggestions"
                 description="Display AI-generated conversation starters in the chat interface"
               />
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700">Default Chat Model</label>
+                <select
+                  value={defaultChatModel}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    setDefaultChatModel(value)
+                    updateSettingMutation.mutate({ key: 'ollama.defaultChatModel', value })
+                  }}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-desert-green"
+                >
+                  <option value="">No explicit default</option>
+                  {textModels.map((model) => (
+                    <option key={model.name} value={model.name}>
+                      {model.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-gray-500">Preferred starting model in chat when there is no last active model to restore.</p>
+              </div>
+              <Switch
+                checked={prewarmDefaultChatModel}
+                onChange={(newVal) => {
+                  setPrewarmDefaultChatModel(newVal)
+                  updateSettingMutation.mutate({ key: 'ollama.prewarmDefaultChatModel', value: newVal })
+                }}
+                label="Preload Default Chat Model On Boot"
+                description="Warm the configured default chat model at startup so the first inference comes back faster."
+              />
               <Switch
                 checked={prewarmOnBoot}
                 onChange={(newVal) => {
                   setPrewarmOnBoot(newVal)
                   updateSettingMutation.mutate({ key: 'ollama.prewarmOnBoot', value: newVal })
                 }}
-                label="Prewarm Selected Model On Boot"
-                description="Automatically load the currently selected chat model after startup so it is ready sooner when you open chat."
+                label="Prewarm Last Active Chat Model On Boot"
+                description="Automatically restore the last active chat model after startup."
               />
               <Switch
                 checked={keepModelWarm}
@@ -292,9 +372,88 @@ export default function ModelsPage(props: {
                   setKeepModelWarm(newVal)
                   updateSettingMutation.mutate({ key: 'ollama.keepModelWarm', value: newVal })
                 }}
-                label="Keep Selected Model Warm"
-                description="Keep the selected chat model resident after use to reduce cold-start delays between conversations."
+                label="Keep Active Chat Model Warm"
+                description="Keep the active chat model resident after use. When you load another chat model, Nomad unloads the old main model while leaving helper models available."
               />
+            </SettingsCard>
+
+            <SettingsCard
+              title="Text Helper Model"
+              description="Used for supporting tasks like query rewriting and chat title generation."
+            >
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700">Helper Text Model</label>
+                <select
+                  value={helperTextModel}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    setHelperTextModel(value)
+                    updateSettingMutation.mutate({ key: 'ollama.helperTextModel', value })
+                  }}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-desert-green"
+                >
+                  {textModels.map((model) => (
+                    <option key={model.name} value={model.name}>
+                      {model.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <Switch
+                checked={prewarmHelperModels}
+                onChange={(newVal) => {
+                  setPrewarmHelperModels(newVal)
+                  updateSettingMutation.mutate({ key: 'ollama.prewarmHelperModels', value: newVal })
+                }}
+                label="Preload Helper Models On Boot"
+                description="Load the configured helper text and embedding models at startup so helper workflows avoid a cold start."
+              />
+            </SettingsCard>
+
+            <SettingsCard
+              title="Embedding / RAG Helper Model"
+              description="Used for document embeddings and semantic retrieval."
+            >
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700">Embedding / RAG Helper Model</label>
+                <select
+                  value={helperEmbeddingModel}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    setHelperEmbeddingModel(value)
+                    updateSettingMutation.mutate({ key: 'ollama.helperEmbeddingModel', value })
+                  }}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-desert-green"
+                >
+                  {embeddingModels.length === 0 && <option value="">No embedding model installed</option>}
+                  {embeddingModels.map((model) => (
+                    <option key={model.name} value={model.name}>
+                      {model.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-gray-500">Pick an embedding-capable model here. If none are installed yet, download one first.</p>
+              </div>
+              {embeddingModels.length === 0 && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+                  <p className="text-sm text-amber-900">
+                    No embedding model is installed right now. RAG indexing and semantic retrieval will stay limited until one is available.
+                  </p>
+                  <StyledButton
+                    variant="secondary"
+                    className="mt-3"
+                    onClick={handleInstallRecommendedEmbeddingModel}
+                  >
+                    Download Recommended Embedding Model
+                  </StyledButton>
+                </div>
+              )}
+            </SettingsCard>
+
+            <SettingsCard
+              title="Assistant Behavior"
+              description="Set the assistant name and add behavioral context that gets injected into the system prompt."
+            >
               <Input
                 name="aiAssistantCustomName"
                 label="Assistant Name"
@@ -309,7 +468,24 @@ export default function ModelsPage(props: {
                   })
                 }
               />
-            </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700">Prompt Context Injection</label>
+                <textarea
+                  value={aiAssistantContextPrompt}
+                  onChange={(e) => setAiAssistantContextPrompt(e.target.value)}
+                  onBlur={() =>
+                    updateSettingMutation.mutate({
+                      key: 'ai.assistantContextPrompt',
+                      value: aiAssistantContextPrompt,
+                    })
+                  }
+                  rows={5}
+                  placeholder="Add tone, behavioral rules, or domain-specific instructions for the assistant."
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-desert-green"
+                />
+                <p className="mt-1 text-xs text-gray-500">This is appended to the assistant system prompt so you can steer personality, format, and behavior.</p>
+              </div>
+            </SettingsCard>
           </div>
           <ActiveModelDownloads withHeader />
 

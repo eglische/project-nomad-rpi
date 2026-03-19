@@ -5,12 +5,20 @@ export const KV_STORE_SCHEMA = {
   'chat.folders':               'string',
   'ollama.prewarmOnBoot':       'boolean',
   'ollama.keepModelWarm':       'boolean',
+  'ollama.defaultChatModel':    'string',
+  'ollama.prewarmDefaultChatModel': 'boolean',
+  'ollama.helperTextModel':     'string',
+  'ollama.helperEmbeddingModel':'string',
+  'ollama.prewarmHelperModels': 'boolean',
+  'rag.maxUploadSizeMb':        'string',
+  'rag.watchFolderPath':        'string',
   'rag.docsEmbedded':           'boolean',
   'system.updateAvailable':     'boolean',
   'system.latestVersion':       'string',
   'system.earlyAccess':         'boolean',
   'ui.hasVisitedEasySetup':     'boolean',
   'ai.assistantCustomName':     'string',
+  'ai.assistantContextPrompt':  'string',
 } as const
 
 type KVTagToType<T extends string> = T extends 'boolean' ? boolean : string

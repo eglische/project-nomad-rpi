@@ -159,6 +159,68 @@ export default class ServiceSeeder extends BaseSeeder {
       is_dependency_service: false,
       depends_on: null,
     },
+    {
+      service_name: SERVICE_NAMES.RADIO,
+      friendly_name: 'Radio',
+      powered_by: 'welle.io',
+      display_order: 12,
+      description:
+        'RTL-SDR powered DAB/DAB+ radio receiver with a browser UI for scanning and playback',
+      icon: 'IconRadio',
+      container_image: 'project-nomad-local/radio:latest',
+      source_repo: 'https://github.com/AlbrechtL/welle.io',
+      container_command: '-F rtl_sdr -w 8000 -c /config/welle-cli.ini',
+      container_config: JSON.stringify({
+        HostConfig: {
+          RestartPolicy: { Name: 'unless-stopped' },
+          Privileged: true,
+          PortBindings: { '8000/tcp': [{ HostPort: '8400' }] },
+          Binds: [
+            `${ServiceSeeder.NOMAD_STORAGE_ABS_PATH}/radio:/config`,
+            '/dev/bus/usb:/dev/bus/usb',
+            '/run/udev:/run/udev:ro',
+          ],
+        },
+        ExposedPorts: { '8000/tcp': {} },
+      }),
+      ui_location: '8400',
+      installed: false,
+      installation_status: 'idle',
+      is_dependency_service: false,
+      depends_on: null,
+    },
+    {
+      service_name: SERVICE_NAMES.OPENWEBRX,
+      friendly_name: 'Spectrum Analyzer',
+      powered_by: 'OpenWebRX+',
+      display_order: 13,
+      description:
+        'Raw SDR web receiver and signal analysis interface for spectrum browsing and protocol decoding',
+      icon: 'IconAntennaBars5',
+      container_image: 'slechev/openwebrxplus:latest',
+      source_repo: 'https://www.openwebrx.de/',
+      container_command: null,
+      container_config: JSON.stringify({
+        Env: ['TZ=Europe/Madrid', 'OPENWEBRX_ADMIN_USER=admin', 'OPENWEBRX_ADMIN_PASSWORD=password'],
+        HostConfig: {
+          RestartPolicy: { Name: 'unless-stopped' },
+          Privileged: true,
+          PortBindings: { '8073/tcp': [{ HostPort: '8500' }] },
+          Binds: [
+            `${ServiceSeeder.NOMAD_STORAGE_ABS_PATH}/openwebrx-config:/etc/openwebrx`,
+            `${ServiceSeeder.NOMAD_STORAGE_ABS_PATH}/openwebrx:/var/lib/openwebrx`,
+            '/dev/bus/usb:/dev/bus/usb',
+            '/run/udev:/run/udev:ro',
+          ],
+        },
+        ExposedPorts: { '8073/tcp': {} },
+      }),
+      ui_location: '8500',
+      installed: false,
+      installation_status: 'idle',
+      is_dependency_service: false,
+      depends_on: null,
+    },
   ]
 
   async run() {

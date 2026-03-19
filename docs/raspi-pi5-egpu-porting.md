@@ -391,17 +391,82 @@ So the clean path is to support GPU-backed Ollama in Docker, not to keep the pre
 
 Desired layout:
 
-- local disk: AI runtime/model storage
-- `/mnt/nomad-data`: KB/content/vector/document storage
+- if an external disk is selected during install:
+  - `/mnt/nomad-data/project-nomad/storage` becomes the service data root for heavy app data
+  - this includes ZIM content, Qdrant data, Kolibri data, Flatnotes data, and Ollama model storage
+- if no external disk is selected:
+  - Nomad falls back to the local storage root on the TF card
 
-Upstream defaults everything under `/opt/project-nomad/storage`, so this fork will need storage-path adaptation.
+Implementation status:
+
+- the installer already rewrites the management compose file so `NOMAD_STORAGE_PATH` and the admin `/app/storage` mount point at the selected external storage root
+- service definitions seeded through `NOMAD_STORAGE_PATH` therefore inherit the same external path automatically
+- recovery/import logic already scans the external storage root for preserved service data, including `storage/ollama`
+
+Important caveat:
+
+- older installs that kept Ollama data on the TF card cannot recover those model blobs from the external HDD after the card is replaced
+- only data that actually lived under the external Nomad storage root survives recovery
 
 ## Immediate Next Steps
 
 1. Point the installer's GitHub repo variables at the eventual fork instead of upstream defaults.
 2. Replace/build arm64-incompatible images.
-3. Adapt Nomad service definitions so model storage also lands on the selected external disk where desired.
+3. Keep validating that all Pi recovery and fresh-install paths continue to bind heavy service data to the selected external storage root.
 4. Update management compose and related installer assets to use the fork-controlled service definitions.
+
+## Minimum Working NVIDIA Path
+
+The minimum viable Pi 5 + RTX 4060 Ti path is now clearer:
+
+- only `Ollama` needs to be GPU-backed for the current target
+- the critical host prerequisites are not optional:
+  - 4K page-size kernel on Pi 5
+  - NVIDIA AArch64 userspace driver `580.95.05`
+  - patched `open-gpu-kernel-modules`
+  - CUDA toolkit `13.0.2`
+  - NVIDIA Container Toolkit
+  - Docker GPU runtime verification
+
+### Installer requirements
+
+If the installer detects `arm64` + Raspberry Pi + an NVIDIA PCI device, it should:
+
+1. enforce the Pi 5 4K kernel path before continuing
+2. install the NVIDIA `580.95.05` userspace stack
+3. build/install the patched `open-gpu-kernel-modules`
+4. install CUDA `13.0.2`
+5. verify host `nvidia-smi`
+6. verify Docker GPU access with a CUDA test container
+7. only then allow Ollama/GPU service installation to proceed
+
+If any of those steps fail, the installer should stop with a clear recovery message instead of pretending GPU inference is ready.
+
+### Nomad backend requirement
+
+Nomad must not rely on the Docker CLI inside `nomad_admin` to decide whether NVIDIA is usable.
+
+Reason:
+
+- `nomad_admin` does not ship with the `docker` binary
+- CLI-based smoke tests therefore fail even when the host Docker GPU path is healthy
+- this causes `nomad_ollama` to be created without GPU device requests
+
+Required implementation:
+
+- GPU smoke test from the backend should use Dockerode / Docker API directly
+- on success, `nomad_ollama` must be created with NVIDIA `DeviceRequests`
+
+### Validated live behavior
+
+On `192.168.1.14`, after applying the above:
+
+- host `nvidia-smi` works
+- Docker CUDA smoke test works
+- `nomad_ollama` is created with NVIDIA `DeviceRequests`
+- Ollama logs show `library=CUDA`
+- model load logs show layers offloaded to `CUDA0`
+- Nomad `/api/ollama/chat` responds successfully using the GPU-backed Ollama container
 
 ## Deferred TODOs
 
@@ -448,3 +513,31 @@ Rationale:
 
 - the Kiwix content itself is only half the system; usable chat over that content depends on a reliable, understandable RAG ingestion path
 - before expanding the library significantly, the indexing pipeline should be understood well enough to operate, tune, and extend without guesswork
+
+### SDR tools on Pi and other hosts
+
+Current state:
+
+- Nomad now has two SDR-oriented apps in the local repo:
+  - `Radio` for DAB/DAB+ listening via `welle-cli`
+  - `Spectrum Analyzer` for raw SDR browsing via OpenWebRX+
+- Both are containerized and wired into the normal Nomad service lifecycle.
+- A unified `/radio` launcher page now fronts both tools so users do not have to start them from the Apps page manually.
+
+Constraints:
+
+- With one RTL-SDR dongle, both apps cannot run against the device at the same time.
+- Nomad now enforces a handoff:
+  - starting Radio stops Spectrum Analyzer
+  - starting Spectrum Analyzer stops Radio
+
+Implementation notes:
+
+- The Radio local image build path should remain host-architecture aware, not Pi-arm64 pinned, so the same service definition can work on x86 hosts too.
+- The host prep helper for RTL-SDR device ownership should continue to be shipped through install/update/start flows so SDR containers can claim the dongle reliably.
+
+Near-term direction:
+
+- keep OpenWebRX+ as the raw-analysis path
+- keep Radio as the DAB-focused listening path
+- later, the `/radio` launcher can evolve into a more integrated SDR workspace, but the current split-launcher model is acceptable for now

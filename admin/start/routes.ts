@@ -29,6 +29,7 @@ router.get('/home', [HomeController, 'home'])
 router.on('/about').renderInertia('about')
 router.get('/chat', [ChatsController, 'inertia'])
 router.get('/maps', [MapsController, 'index'])
+router.get('/radio', [HomeController, 'radio'])
 router.on('/knowledge-base').redirectToPath('/chat?knowledge_base=true') // redirect for legacy knowledge-base links
 
 router.get('/easy-setup', [EasySetupController, 'index'])
@@ -105,6 +106,8 @@ router
     router.post('/models', [OllamaController, 'dispatchModelDownload'])
     router.delete('/models', [OllamaController, 'deleteModel'])
     router.get('/installed-models', [OllamaController, 'installedModels'])
+    router.get('/runtime-status', [OllamaController, 'runtimeStatus'])
+    router.post('/load-model', [OllamaController, 'loadModel'])
   })
   .prefix('/api/ollama')
 
@@ -138,6 +141,7 @@ router
     router.get('/info', [SystemController, 'getSystemInfo'])
     router.get('/activity', [SystemController, 'getActivity'])
     router.get('/diagnostics', [SystemController, 'getDiagnostics'])
+    router.get('/recovery', [SystemController, 'getRecovery'])
     router.get('/internet-status', [SystemController, 'getInternetStatus'])
     router.get('/services', [SystemController, 'getServices'])
     router.post('/services/affect', [SystemController, 'affectService'])
@@ -150,6 +154,8 @@ router
     router.post('/resume-installed-services', [SystemController, 'resumeInstalledServices'])
     router.post('/retry-failed-embedding-jobs', [SystemController, 'retryFailedEmbeddingJobs'])
     router.post('/retry-failed-download-jobs', [SystemController, 'retryFailedDownloadJobs'])
+    router.post('/clear-failed-jobs', [SystemController, 'clearFailedJobs'])
+    router.post('/recovery/import', [SystemController, 'importRecovery'])
     router.post('/subscribe-release-notes', [SystemController, 'subscribeToReleaseNotes'])
     router.get('/latest-version', [SystemController, 'checkLatestVersion'])
     router.post('/update', [SystemController, 'requestSystemUpdate'])

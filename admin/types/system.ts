@@ -86,7 +86,13 @@ export type DiagnosticCheck = {
   impact?: string
   suggestedAction?: string
   technicalDetails?: string[]
-  autoFixAction?: 'reconcile' | 'resume-installed' | 'retry-failed-embeddings' | 'retry-failed-downloads' | null
+  autoFixAction?:
+    | 'reconcile'
+    | 'resume-installed'
+    | 'retry-failed-embeddings'
+    | 'retry-failed-downloads'
+    | 'clear-failed-jobs'
+    | null
 }
 
 export type DiagnosticsResponse = {
@@ -105,6 +111,34 @@ export type ReconcileResponse = {
   message: string
   actions: string[]
   skipped?: boolean
+}
+
+export type RecoveryServiceState = 'recoverable' | 'importing' | 'imported'
+
+export type RecoveryServiceCandidate = {
+  serviceName: string
+  friendlyName: string
+  description: string | null
+  storagePath: string
+  evidence: string[]
+  state: RecoveryServiceState
+  installed: boolean
+  installationStatus: 'idle' | 'installing' | 'error'
+  containerPresent: boolean
+}
+
+export type RecoveryScanResponse = {
+  generatedAt: string
+  storagePath: string
+  previousNomadDataFound: boolean
+  hasRecoverableServices: boolean
+  services: RecoveryServiceCandidate[]
+}
+
+export type RecoveryImportResponse = {
+  success: boolean
+  message: string
+  actions: string[]
 }
 
 export type CheckLatestVersionResult = {

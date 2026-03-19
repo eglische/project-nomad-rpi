@@ -1,7 +1,7 @@
 import { inject } from '@adonisjs/core'
 import { ChatRequest, Ollama } from 'ollama'
-import { NomadOllamaModel } from '../../types/ollama.js'
-import { FALLBACK_RECOMMENDED_OLLAMA_MODELS } from '../../constants/ollama.js'
+import { NomadOllamaModel, OllamaRuntimeStatus } from '../../types/ollama.js'
+import { DEFAULT_EMBEDDING_MODEL, DEFAULT_QUERY_REWRITE_MODEL, FALLBACK_RECOMMENDED_OLLAMA_MODELS } from '../../constants/ollama.js'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import logger from '@adonisjs/core/services/logger'
@@ -19,6 +19,7 @@ const NOMAD_MODELS_API_PATH = '/api/v1/ollama/models'
 const MODELS_CACHE_FILE = path.join(process.cwd(), 'storage', 'ollama-models-cache.json')
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000 // 24 hours
 const CHAT_MODEL_KEEP_ALIVE = '24h'
+const HELPER_MODEL_KEEP_ALIVE = '24h'
 
 @inject()
 export class OllamaService {
@@ -126,11 +127,81 @@ export class OllamaService {
     return this.ollama!
   }
 
+  public async getRuntimeStatus(): Promise<OllamaRuntimeStatus> {
+    try {
+      await this._ensureDependencies()
+      if (!this.ollama) {
+        return { available: false, loadedModels: [], gpuMemoryUsedBytes: 0 }
+      }
+
+      const ps = await this.ollama.ps()
+      const loadedModels = (ps.models || []).map((model) => ({
+        name: model.name,
+        size: Number(model.size || 0),
+        sizeVramBytes: Number(model.size_vram || 0),
+        until: model.expires_at ? new Date(model.expires_at).toISOString() : undefined,
+      }))
+
+      let gpuMemoryUsedBytes = 0
+
+      try {
+        const dockerService = new (await import('./docker_service.js')).DockerService()
+        const container = dockerService.docker.getContainer(SERVICE_NAMES.OLLAMA)
+        const exec = await container.exec({
+          Cmd: [
+            'sh',
+            '-lc',
+            'nvidia-smi --query-compute-apps=process_name,used_memory --format=csv,noheader,nounits 2>/dev/null || true',
+          ],
+          AttachStdout: true,
+          AttachStderr: true,
+        })
+        const stream = await exec.start({ hijack: false, stdin: false })
+        const output = await new Promise<string>((resolve) => {
+          let text = ''
+          stream.on('data', (chunk: Buffer) => {
+            text += chunk.toString()
+          })
+          stream.on('end', () => resolve(text))
+        })
+
+        gpuMemoryUsedBytes = output
+          .split('\n')
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .filter((line) => line.toLowerCase().includes('ollama'))
+          .reduce((total, line) => {
+            const parts = line.split(',').map((part) => part.trim())
+            const memoryMiB = Number.parseInt(parts[1] || '0', 10)
+            if (Number.isFinite(memoryMiB) && memoryMiB > 0) {
+              return total + memoryMiB * 1024 * 1024
+            }
+            return total
+          }, 0)
+      } catch {
+        gpuMemoryUsedBytes = 0
+      }
+
+      return {
+        available: true,
+        loadedModels,
+        gpuMemoryUsedBytes,
+      }
+    } catch {
+      return {
+        available: false,
+        loadedModels: [],
+        gpuMemoryUsedBytes: 0,
+      }
+    }
+  }
+
   public async chat(chatRequest: ChatRequest & { stream?: boolean }) {
     await this._ensureDependencies()
     if (!this.ollama) {
       throw new Error('Ollama client is not initialized.')
     }
+    await this.ensureChatModelResidency(chatRequest.model)
     const keepAlive = await this.getChatModelKeepAlive(chatRequest.model)
     return await this.ollama.chat({
       ...chatRequest,
@@ -144,6 +215,7 @@ export class OllamaService {
     if (!this.ollama) {
       throw new Error('Ollama client is not initialized.')
     }
+    await this.ensureChatModelResidency(chatRequest.model)
     const keepAlive = await this.getChatModelKeepAlive(chatRequest.model)
     return await this.ollama.chat({
       ...chatRequest,
@@ -152,7 +224,47 @@ export class OllamaService {
     })
   }
 
-  public async prewarmConfiguredChatModel(): Promise<void> {
+  public async loadChatModel(modelName: string): Promise<{ success: boolean; message: string }> {
+    try {
+      await this._ensureDependencies()
+      if (!this.ollama) {
+        throw new Error('Ollama client is not initialized.')
+      }
+
+      const installedModels = await this.getModels(true)
+      const isInstalled = installedModels?.some((model) => model.name === modelName)
+      if (!isInstalled) {
+        return {
+          success: false,
+          message: `Model ${modelName} is not installed.`,
+        }
+      }
+
+      await this.prewarmConfiguredHelperModels()
+      await this.unloadNonHelperModelsExcept(modelName)
+      await this.ollama.generate({
+        model: modelName,
+        prompt: '',
+        stream: false,
+        keep_alive: CHAT_MODEL_KEEP_ALIVE,
+      })
+
+      return {
+        success: true,
+        message: `Model ${modelName} is loaded and ready.`,
+      }
+    } catch (error) {
+      logger.error(
+        `[OllamaService] Failed to load chat model "${modelName}": ${error instanceof Error ? error.message : error}`
+      )
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Failed to load model.',
+      }
+    }
+  }
+
+  public async prewarmConfiguredModels(): Promise<void> {
     if (this.prewarmPromise) {
       return this.prewarmPromise
     }
@@ -164,36 +276,26 @@ export class OllamaService {
           return
         }
 
-        const prewarmOnBoot = await KVStore.getValue('ollama.prewarmOnBoot')
-        if (prewarmOnBoot === false) {
-          return
-        }
+        await this.prewarmConfiguredHelperModels()
 
         const installedModels = await this.getModels()
         if (!installedModels || installedModels.length === 0) {
           return
         }
 
-        const selectedModel = await KVStore.getValue('chat.lastModel')
-        const targetModel =
-          (selectedModel && installedModels.find((model) => model.name === selectedModel)?.name) ||
-          installedModels[0]?.name
-
-        if (!targetModel) {
-          return
+        const targets = await this.getConfiguredChatPrewarmTargets(installedModels.map((model) => model.name))
+        for (const targetModel of targets) {
+          logger.info(`[OllamaService] Prewarming chat model: ${targetModel}`)
+          await this.ollama.generate({
+            model: targetModel,
+            prompt: '',
+            stream: false,
+            keep_alive: CHAT_MODEL_KEEP_ALIVE,
+          })
         }
-
-        const keepAlive = await this.getChatModelKeepAlive(targetModel)
-        logger.info(`[OllamaService] Prewarming selected chat model: ${targetModel}`)
-        await this.ollama.generate({
-          model: targetModel,
-          prompt: '',
-          stream: false,
-          ...(keepAlive !== undefined ? { keep_alive: keepAlive } : {}),
-        })
       } catch (error) {
         logger.warn(
-          `[OllamaService] Failed to prewarm configured chat model: ${error instanceof Error ? error.message : error}`
+          `[OllamaService] Failed to prewarm configured models: ${error instanceof Error ? error.message : error}`
         )
       } finally {
         this.prewarmPromise = null
@@ -201,6 +303,120 @@ export class OllamaService {
     })()
 
     return this.prewarmPromise
+  }
+
+  public async prewarmConfiguredChatModel(): Promise<void> {
+    return this.prewarmConfiguredModels()
+  }
+
+  public async getConfiguredHelperTextModel(): Promise<string> {
+    return (await KVStore.getValue('ollama.helperTextModel')) || DEFAULT_QUERY_REWRITE_MODEL
+  }
+
+  public async getConfiguredEmbeddingModel(): Promise<string> {
+    return (await KVStore.getValue('ollama.helperEmbeddingModel')) || DEFAULT_EMBEDDING_MODEL
+  }
+
+  public async getConfiguredHelperModels(): Promise<string[]> {
+    const helperTextModel = await this.getConfiguredHelperTextModel()
+    const helperEmbeddingModel = await this.getConfiguredEmbeddingModel()
+    return [...new Set([helperTextModel, helperEmbeddingModel].filter(Boolean))]
+  }
+
+  public async getConfiguredDefaultChatModel(): Promise<string | null> {
+    return (await KVStore.getValue('ollama.defaultChatModel')) || null
+  }
+
+  private async getConfiguredChatPrewarmTargets(installedModelNames: string[]): Promise<string[]> {
+    const targets: string[] = []
+    const defaultChatModel = await this.getConfiguredDefaultChatModel()
+    const prewarmDefaultChatModel = await KVStore.getValue('ollama.prewarmDefaultChatModel')
+    if (prewarmDefaultChatModel !== false && defaultChatModel && installedModelNames.includes(defaultChatModel)) {
+      targets.push(defaultChatModel)
+    }
+
+    const selectedModel = await KVStore.getValue('chat.lastModel')
+    const prewarmOnBoot = await KVStore.getValue('ollama.prewarmOnBoot')
+    if (prewarmOnBoot !== false && selectedModel && installedModelNames.includes(selectedModel)) {
+      targets.push(selectedModel)
+    }
+
+    return [...new Set(targets)]
+  }
+
+  private async prewarmConfiguredHelperModels(): Promise<void> {
+    const prewarmHelperModels = await KVStore.getValue('ollama.prewarmHelperModels')
+    if (prewarmHelperModels === false) {
+      return
+    }
+
+    const allModels = await this.getModels(true)
+    const installedNames = new Set((allModels || []).map((model) => model.name))
+    const helperTextModel = await this.getConfiguredHelperTextModel()
+    const embeddingModel = await this.getConfiguredEmbeddingModel()
+
+    if (installedNames.has(helperTextModel)) {
+      logger.info(`[OllamaService] Prewarming helper text model: ${helperTextModel}`)
+      await this.ollama!.generate({
+        model: helperTextModel,
+        prompt: 'Warm.',
+        stream: false,
+        options: {
+          num_predict: 1,
+          temperature: 0,
+        },
+        keep_alive: HELPER_MODEL_KEEP_ALIVE,
+      })
+    }
+
+    if (installedNames.has(embeddingModel)) {
+      logger.info(`[OllamaService] Prewarming helper embedding model: ${embeddingModel}`)
+      await this.ollama!.embed({
+        model: embeddingModel,
+        input: 'warmup',
+        keep_alive: HELPER_MODEL_KEEP_ALIVE,
+      })
+    }
+  }
+
+  private async ensureChatModelResidency(modelName: string): Promise<void> {
+    if (!this.ollama || !modelName) {
+      return
+    }
+
+    await this.prewarmConfiguredHelperModels()
+    await this.unloadNonHelperModelsExcept(modelName)
+  }
+
+  private async unloadNonHelperModelsExcept(modelName: string): Promise<void> {
+    if (!this.ollama) {
+      return
+    }
+
+    const helperModels = new Set(await this.getConfiguredHelperModels())
+    const runtime = await this.ollama.ps()
+    const loadedModels = runtime.models || []
+    const keepLoaded = new Set([modelName, ...helperModels])
+
+    for (const loadedModel of loadedModels) {
+      if (keepLoaded.has(loadedModel.name)) {
+        continue
+      }
+
+      try {
+        logger.info(`[OllamaService] Unloading inactive chat model: ${loadedModel.name}`)
+        await this.ollama.generate({
+          model: loadedModel.name,
+          prompt: '',
+          stream: false,
+          keep_alive: 0,
+        })
+      } catch (error) {
+        logger.warn(
+          `[OllamaService] Failed to unload model ${loadedModel.name}: ${error instanceof Error ? error.message : error}`
+        )
+      }
+    }
   }
 
   private async getChatModelKeepAlive(modelName?: string): Promise<string | number | undefined> {

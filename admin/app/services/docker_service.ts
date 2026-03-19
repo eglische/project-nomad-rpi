@@ -9,8 +9,9 @@ import { ZIM_STORAGE_PATH } from '../utils/fs.js'
 import { SERVICE_NAMES } from '../../constants/service_names.js'
 import { exec } from 'child_process'
 import { promisify } from 'util'
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
+import { existsSync } from 'node:fs'
 // import { readdir } from 'fs/promises'
 import KVStore from '#models/kv_store'
 import { BROADCAST_CHANNELS } from '../../constants/broadcast.js'
@@ -20,6 +21,31 @@ const PI_ARM64_IMAGE_OVERRIDES = {
     image: 'treehouses/kolibri:0.10.3',
   },
 } as const
+
+type LocalServiceBuildTarget = {
+  image: string
+  contextPath: string
+  dockerfile: string
+  src: readonly string[]
+  platform?: string
+}
+
+const LOCAL_SERVICE_BUILD_TARGETS: Record<string, LocalServiceBuildTarget> = {
+  [SERVICE_NAMES.RADIO]: {
+    image: 'project-nomad-local/radio:latest',
+    contextPath: join(process.cwd(), 'resources', 'service-builds', 'radio'),
+    dockerfile: 'Dockerfile',
+    src: ['Dockerfile', 'run-radio.sh'],
+  },
+  [SERVICE_NAMES.OPENWEBRX]: {
+    image: 'project-nomad-local/openwebrx:latest',
+    contextPath: join(process.cwd(), 'resources', 'service-builds', 'openwebrx'),
+    dockerfile: 'Dockerfile',
+    src: ['Dockerfile', 'patch_openwebrx.py'],
+  },
+} as const
+
+const EXCLUSIVE_RTL_SDR_SERVICES = [SERVICE_NAMES.RADIO, SERVICE_NAMES.OPENWEBRX] as const
 
 @inject()
 export class DockerService {
@@ -63,6 +89,7 @@ export class DockerService {
       }
 
       const dockerContainer = this.docker.getContainer(container.Id)
+      await this._ensureExclusiveSdrAccess(serviceName, action === 'start' || action === 'restart')
       if (action === 'stop') {
         await dockerContainer.stop()
         return {
@@ -437,6 +464,12 @@ export class DockerService {
         finalImage = arm64Target.image
       }
 
+      const localBuildTarget = this._resolveLocalBuildTarget(service)
+      if (localBuildTarget) {
+        finalImage = localBuildTarget.image
+        await this._buildLocalServiceImage(service, localBuildTarget)
+      }
+
       const imageExists = await this._checkImageExists(finalImage)
       if (imageExists) {
         if (
@@ -450,7 +483,7 @@ export class DockerService {
           )
           await this._removeLocalImage(finalImage)
           await this._pullImage(finalImage, service.service_name, arm64Target.platform)
-        } else {
+        } else if (!localBuildTarget) {
           this._broadcast(
             service.service_name,
             'image-exists',
@@ -470,6 +503,17 @@ export class DockerService {
           `Pre-install actions for Kiwix Serve completed successfully.`
         )
       }
+
+      if (service.service_name === SERVICE_NAMES.OPENWEBRX) {
+        await this._prepareOpenWebRxDefaults()
+        this._broadcast(
+          service.service_name,
+          'preinstall-complete',
+          'Prepared OpenWebRX defaults and standard receiver profiles.'
+        )
+      }
+
+      await this._ensureExclusiveSdrAccess(service.service_name, true)
 
       // GPU-aware configuration for Ollama
       let gpuHostConfig = containerConfig?.HostConfig || {}
@@ -511,6 +555,12 @@ export class DockerService {
             service.service_name,
             'gpu-config',
             `NVIDIA GPU detected but NVIDIA Container Toolkit is not installed. Using CPU-only configuration. Install the toolkit and reinstall AI Assistant for GPU acceleration: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html`
+          )
+        } else if (gpuResult.runtimeUnhealthy) {
+          this._broadcast(
+            service.service_name,
+            'gpu-config',
+            `NVIDIA runtime was detected, but the container GPU smoke test failed. Using CPU-only configuration until the host NVIDIA driver/userspace stack is fully installed and validated.`
           )
         } else {
           this._broadcast(
@@ -679,10 +729,144 @@ export class DockerService {
     }
   }
 
+  private async _prepareOpenWebRxDefaults(): Promise<void> {
+    const storageRoot = '/app/storage'
+    const openwebrxPath = join(storageRoot, 'openwebrx')
+    const openwebrxConfigPath = join(storageRoot, 'openwebrx-config')
+    const settingsPath = join(openwebrxPath, 'settings.json')
+
+    await mkdir(openwebrxPath, { recursive: true })
+    await mkdir(openwebrxConfigPath, { recursive: true })
+
+    let settings: Record<string, any> = {}
+    if (existsSync(settingsPath)) {
+      try {
+        const raw = await readFile(settingsPath, 'utf-8')
+        settings = raw.trim() ? JSON.parse(raw) : {}
+      } catch (error) {
+        logger.warn(
+          `[DockerService] Failed to parse existing OpenWebRX settings. Re-seeding sane defaults: ${error instanceof Error ? error.message : error}`
+        )
+      }
+    }
+
+    settings.version = settings.version ?? 8
+    settings.receiver_name = settings.receiver_name || 'Project N.O.M.A.D. SDR'
+    settings.receiver_location =
+      settings.receiver_location && settings.receiver_location !== 'Europe'
+        ? settings.receiver_location
+        : 'Configure location in Settings'
+    settings.receiver_asl = settings.receiver_asl ?? 0
+    settings.receiver_admin =
+      settings.receiver_admin && settings.receiver_admin !== 'example@example.com'
+        ? settings.receiver_admin
+        : ''
+    settings.receiver_country = settings.receiver_country ?? ''
+    settings.receiver_gps =
+      settings.receiver_gps &&
+      Number.isFinite(settings.receiver_gps.lat) &&
+      Number.isFinite(settings.receiver_gps.lon) &&
+      !(settings.receiver_gps.lat === 47 && settings.receiver_gps.lon === 19)
+        ? settings.receiver_gps
+        : { lat: 0, lon: 0 }
+    settings.allow_center_freq_changes = true
+    settings.magic_key = ''
+
+    settings.sdrs = settings.sdrs || {}
+    settings.sdrs.rtlsdr = settings.sdrs.rtlsdr || {
+      name: 'RTL-SDR',
+      type: 'rtl_sdr',
+      profiles: {},
+    }
+    settings.sdrs.rtlsdr.profiles = settings.sdrs.rtlsdr.profiles || {}
+
+    const profiles = settings.sdrs.rtlsdr.profiles as Record<string, Record<string, any>>
+
+    const collapseProfilesByName = (profileName: string) => {
+      const matchingKeys = Object.keys(profiles).filter((key) => profiles[key]?.name === profileName)
+      if (matchingKeys.length <= 1) {
+        return
+      }
+
+      const keepKey = matchingKeys[0]
+      for (const duplicateKey of matchingKeys.slice(1)) {
+        delete profiles[duplicateKey]
+      }
+
+      return keepKey
+    }
+
+    const upsertProfileByName = (profileName: string, defaults: Record<string, any>) => {
+      const dedupedKey = collapseProfilesByName(profileName)
+      const existingKey =
+        dedupedKey ||
+        Object.keys(profiles).find((key) => profiles[key]?.name === profileName)
+      const targetKey = existingKey || defaults.key || profileName.toLowerCase().replace(/\s+/g, '_')
+      const current = profiles[targetKey] || {}
+      profiles[targetKey] = {
+        ...current,
+        ...defaults,
+        name: profileName,
+      }
+      delete profiles[targetKey].key
+    }
+
+    upsertProfileByName('Airband', {
+      key: 'airband',
+      center_freq: 127500000,
+      samp_rate: 2048000,
+      start_freq: 118830000,
+      start_mod: 'am',
+      tuning_step: '8330',
+      band_min_freq: 118000000,
+      band_max_freq: 137000000,
+      band_wrap: true,
+    })
+
+    upsertProfileByName('FM Broadcast', {
+      key: 'fm_broadcast',
+      center_freq: 97750000,
+      samp_rate: 2048000,
+      start_freq: 95700000,
+      start_mod: 'wfm',
+      tuning_step: '100000',
+      band_min_freq: 87500000,
+      band_max_freq: 108000000,
+      band_wrap: true,
+    })
+
+    upsertProfileByName('AM Broadcast', {
+      key: 'am_broadcast',
+      center_freq: 1000000,
+      samp_rate: 2048000,
+      start_freq: 999000,
+      start_mod: 'am',
+      tuning_step: '9000',
+      band_min_freq: 531000,
+      band_max_freq: 1701000,
+      band_wrap: true,
+    })
+
+    upsertProfileByName('CB Radio', {
+      key: 'cb_radio',
+      center_freq: 27000000,
+      samp_rate: 2048000,
+      start_freq: 27185000,
+      start_mod: 'nfm',
+      tuning_step: '10000',
+      band_min_freq: 26000000,
+      band_max_freq: 28000000,
+      band_wrap: true,
+    })
+
+    await writeFile(settingsPath, `${JSON.stringify(settings, null, 4)}\n`, 'utf-8')
+  }
+
   private async _cleanupFailedInstallation(serviceName: string): Promise<void> {
     try {
       const service = await Service.query().where('service_name', serviceName).first()
       if (service) {
+        service.installed = false
         service.installation_status = 'error'
         await service.save()
       }
@@ -704,15 +888,21 @@ export class DockerService {
    * Primary: Check Docker runtimes via docker.info() (works from inside containers).
    * Fallback: lspci for host-based installs and AMD detection.
    */
-  private async _detectGPUType(): Promise<{ type: 'nvidia' | 'amd' | 'none'; toolkitMissing?: boolean }> {
+  private async _detectGPUType(): Promise<{ type: 'nvidia' | 'amd' | 'none'; toolkitMissing?: boolean; runtimeUnhealthy?: boolean }> {
     try {
       // Primary: Check Docker daemon for nvidia runtime (works from inside containers)
       try {
         const dockerInfo = await this.docker.info()
         const runtimes = dockerInfo.Runtimes || {}
         if ('nvidia' in runtimes) {
-          logger.info('[DockerService] NVIDIA container runtime detected via Docker API')
-          return { type: 'nvidia' }
+          const gpuSmokePassed = await this._runNvidiaSmokeTest()
+          if (gpuSmokePassed) {
+            logger.info('[DockerService] NVIDIA container runtime detected via Docker API and GPU smoke test passed')
+            return { type: 'nvidia' }
+          }
+
+          logger.warn('[DockerService] NVIDIA runtime is configured, but GPU smoke test failed. Falling back to CPU mode.')
+          return { type: 'none', runtimeUnhealthy: true }
         }
       } catch (error) {
         logger.warn(`[DockerService] Could not query Docker info for GPU runtimes: ${error.message}`)
@@ -754,6 +944,205 @@ export class DockerService {
     } catch (error) {
       logger.warn(`[DockerService] Error detecting GPU type: ${error.message}`)
       return { type: 'none' }
+    }
+  }
+
+  private async _runNvidiaSmokeTest(): Promise<boolean> {
+    const image = 'nvidia/cuda:12.4.1-base-ubuntu22.04'
+    let container: Docker.Container | null = null
+
+    try {
+      await this._ensureDockerImage(image)
+
+      container = await this.docker.createContainer({
+        Image: image,
+        Cmd: ['nvidia-smi', '--query-gpu=name,driver_version', '--format=csv,noheader'],
+        HostConfig: {
+          AutoRemove: false,
+          Runtime: 'nvidia',
+          DeviceRequests: [
+            {
+              Driver: 'nvidia',
+              Count: -1,
+              Capabilities: [['gpu']],
+            },
+          ],
+        },
+      })
+
+      await container.start()
+      const waitResult = await container.wait()
+      const logs = await container.logs({ stdout: true, stderr: true })
+      const output = logs.toString('utf8').trim()
+
+      if (waitResult.StatusCode !== 0) {
+        logger.warn(
+          `[DockerService] NVIDIA smoke test container exited with status ${waitResult.StatusCode}: ${output}`
+        )
+        return false
+      }
+
+      return Boolean(output)
+    } catch (error) {
+      logger.warn(`[DockerService] NVIDIA smoke test failed: ${error instanceof Error ? error.message : error}`)
+      return false
+    } finally {
+      if (container) {
+        try {
+          await container.remove({ force: true })
+        } catch (cleanupError) {
+          logger.warn(
+            `[DockerService] Failed to remove NVIDIA smoke test container: ${cleanupError instanceof Error ? cleanupError.message : cleanupError}`
+          )
+        }
+      }
+    }
+  }
+
+  private async _ensureDockerImage(image: string): Promise<void> {
+    const images = await this.docker.listImages()
+    const present = images.some((entry) => entry.RepoTags?.includes(image))
+    if (present) {
+      return
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      this.docker.pull(image, (error: Error | null, stream: NodeJS.ReadableStream | undefined) => {
+        if (error || !stream) {
+          reject(error ?? new Error(`Failed to pull ${image}`))
+          return
+        }
+
+        this.docker.modem.followProgress(
+          stream,
+          (followError) => {
+            if (followError) {
+              reject(followError)
+              return
+            }
+            resolve()
+          }
+        )
+      })
+    })
+  }
+
+  private _resolveLocalBuildTarget(service: Service): LocalServiceBuildTarget | null {
+    return LOCAL_SERVICE_BUILD_TARGETS[service.service_name] ?? null
+  }
+
+  private async _buildLocalServiceImage(
+    service: Service,
+    target: LocalServiceBuildTarget
+  ): Promise<void> {
+    if (!existsSync(target.contextPath)) {
+      throw new Error(`Local build context not found for ${service.service_name}: ${target.contextPath}`)
+    }
+
+    const existingImage = await this._checkImageExists(target.image)
+    const buildPlatform = target.platform || (await this._getHostDockerPlatform())
+
+    if (existingImage && !(await this._checkImageMatchesPlatform(target.image, buildPlatform))) {
+      this._broadcast(
+        service.service_name,
+        'build-refresh',
+        `Refreshing local image ${target.image} for ${buildPlatform}...`
+      )
+      await this._removeLocalImage(target.image)
+    } else if (existingImage) {
+      this._broadcast(
+        service.service_name,
+        'build-image-exists',
+        `Local image ${target.image} already exists. Rebuilding to ensure the latest Radio backbone is used...`
+      )
+      await this._removeLocalImage(target.image)
+    }
+
+    this._broadcast(
+      service.service_name,
+      'building-image',
+      `Building local Docker image ${target.image} for ${service.friendly_name || service.service_name} on ${buildPlatform}...`
+    )
+
+    const stream = (await (this.docker as any).buildImage(
+      {
+        context: target.contextPath,
+        src: [...target.src],
+      },
+      {
+        t: target.image,
+        platform: buildPlatform,
+        dockerfile: target.dockerfile,
+        pull: true,
+      }
+    )) as NodeJS.ReadableStream
+
+    await new Promise<void>((resolve, reject) => {
+      this.docker.modem.followProgress(
+        stream,
+        (error: Error | null) => {
+          if (error) {
+            reject(error)
+            return
+          }
+          resolve()
+        },
+        (event: any) => {
+          const detail = [event.stream, event.status, event.progress].filter(Boolean).join(' ').trim()
+          if (detail) {
+            this._broadcast(service.service_name, 'building-image', detail)
+          }
+        }
+      )
+    })
+  }
+
+  private async _getHostDockerPlatform(): Promise<string> {
+    const profile = await this._getHostProfile()
+    const archMap: Record<string, string> = {
+      x64: 'amd64',
+      x86_64: 'amd64',
+      amd64: 'amd64',
+      arm64: 'arm64',
+      aarch64: 'arm64',
+      arm: 'arm',
+      armv7l: 'arm',
+    }
+
+    const dockerArch = archMap[profile.architecture] || profile.architecture
+    return `linux/${dockerArch}`
+  }
+
+  private async _ensureExclusiveSdrAccess(serviceName: string, shouldActivate: boolean): Promise<void> {
+    if (!shouldActivate || !EXCLUSIVE_RTL_SDR_SERVICES.includes(serviceName as any)) {
+      return
+    }
+
+    const otherServices = EXCLUSIVE_RTL_SDR_SERVICES.filter((name) => name !== serviceName)
+    if (otherServices.length === 0) {
+      return
+    }
+
+    const containers = await this.docker.listContainers({ all: true })
+    for (const otherService of otherServices) {
+      const otherContainer = containers.find((entry) => entry.Names.includes(`/${otherService}`))
+      if (!otherContainer || otherContainer.State !== 'running') {
+        continue
+      }
+
+      this._broadcast(
+        serviceName,
+        'sdr-handoff',
+        `Stopping ${otherService} so ${serviceName} can claim the RTL-SDR dongle...`
+      )
+
+      try {
+        await this.docker.getContainer(otherContainer.Id).stop({ t: 10 })
+      } catch (error) {
+        logger.warn(
+          `[DockerService] Failed to stop competing RTL-SDR service ${otherService}: ${error instanceof Error ? error.message : error}`
+        )
+      }
     }
   }
 
@@ -1000,12 +1389,18 @@ export class DockerService {
   }
 
   private _broadcast(service: string, status: string, message: string) {
-    transmit.broadcast(BROADCAST_CHANNELS.SERVICE_INSTALLATION, {
-      service_name: service,
-      timestamp: new Date().toISOString(),
-      status,
-      message,
-    })
+    try {
+      transmit.broadcast(BROADCAST_CHANNELS.SERVICE_INSTALLATION, {
+        service_name: service,
+        timestamp: new Date().toISOString(),
+        status,
+        message,
+      })
+    } catch (error) {
+      logger.warn(
+        `[DockerService] Failed to broadcast service update for ${service}: ${error instanceof Error ? error.message : error}`
+      )
+    }
     logger.info(`[DockerService] [${service}] ${status}: ${message}`)
   }
 

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import FileUploader from '~/components/file-uploader'
 import StyledButton from '~/components/StyledButton'
 import StyledSectionHeader from '~/components/StyledSectionHeader'
@@ -10,6 +10,7 @@ import { IconX } from '@tabler/icons-react'
 import { useModals } from '~/context/ModalContext'
 import StyledModal from '../StyledModal'
 import ActiveEmbedJobs from '~/components/ActiveEmbedJobs'
+import { useSystemSetting } from '~/hooks/useSystemSetting'
 
 interface KnowledgeBaseModalProps {
   aiAssistantName?: string
@@ -28,6 +29,18 @@ export default function KnowledgeBaseModal({ aiAssistantName = "AI Assistant", o
   const fileUploaderRef = useRef<React.ComponentRef<typeof FileUploader>>(null)
   const { openModal, closeModal } = useModals()
   const queryClient = useQueryClient()
+  const { data: uploadLimitSetting } = useSystemSetting({ key: 'rag.maxUploadSizeMb' })
+  const { data: watchFolderSetting } = useSystemSetting({ key: 'rag.watchFolderPath' })
+
+  const uploadLimitMb = useMemo(() => {
+    const parsed = Number.parseInt(String(uploadLimitSetting?.value || ''), 10)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 250
+  }, [uploadLimitSetting])
+
+  const watchFolderPath =
+    typeof watchFolderSetting?.value === 'string' && watchFolderSetting.value.trim().length > 0
+      ? watchFolderSetting.value.trim()
+      : '/app/storage/kb_imports'
 
   const { data: storedFiles = [], isLoading: isLoadingFiles } = useQuery({
     queryKey: ['storedFiles'],
@@ -36,11 +49,24 @@ export default function KnowledgeBaseModal({ aiAssistantName = "AI Assistant", o
   })
 
   const uploadMutation = useMutation({
-    mutationFn: (file: File) => api.uploadDocument(file),
-    onSuccess: (data) => {
+    mutationFn: async (uploadFiles: File[]) => {
+      const results: Array<{ message?: string; file_path?: string }> = []
+      for (const file of uploadFiles) {
+        const result = await api.uploadDocument(file)
+        if (result) {
+          results.push(result)
+        }
+      }
+      return results
+    },
+    onSuccess: (results) => {
+      const count = results?.length || files.length || 0
       addNotification({
         type: 'success',
-        message: data?.message || 'Document uploaded and queued for processing',
+        message:
+          count > 1
+            ? `${count} documents uploaded and queued for processing.`
+            : results?.[0]?.message || 'Document uploaded and queued for processing',
       })
       setFiles([])
       if (fileUploaderRef.current) {
@@ -86,7 +112,7 @@ export default function KnowledgeBaseModal({ aiAssistantName = "AI Assistant", o
 
   const handleUpload = () => {
     if (files.length > 0) {
-      uploadMutation.mutate(files[0])
+      uploadMutation.mutate(files)
     }
   }
 
@@ -133,7 +159,8 @@ export default function KnowledgeBaseModal({ aiAssistantName = "AI Assistant", o
               <FileUploader
                 ref={fileUploaderRef}
                 minFiles={1}
-                maxFiles={1}
+                maxFiles={50}
+                maxFileSize={uploadLimitMb * 1024 * 1024}
                 onUpload={(uploadedFiles) => {
                   setFiles(Array.from(uploadedFiles))
                 }}
@@ -147,9 +174,18 @@ export default function KnowledgeBaseModal({ aiAssistantName = "AI Assistant", o
                   disabled={files.length === 0 || uploadMutation.isPending}
                   loading={uploadMutation.isPending}
                 >
-                  Upload
+                  {files.length > 1 ? `Upload ${files.length} Files` : 'Upload'}
                 </StyledButton>
               </div>
+              {files.length > 1 && (
+                <p className="text-center text-sm text-gray-500">
+                  Files will be queued one by one and processed in series.
+                </p>
+              )}
+              <p className="mt-3 text-center text-xs text-gray-500">
+                Upload limit: {uploadLimitMb} MB per file. Watched import folder:{' '}
+                <span className="font-mono">{watchFolderPath}</span>
+              </p>
             </div>
             <div className="border-t bg-white p-6">
               <h3 className="text-lg font-semibold text-desert-green mb-4">

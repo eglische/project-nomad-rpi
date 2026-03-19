@@ -17,6 +17,13 @@ export default class RagController {
       return response.status(400).json({ error: 'No file uploaded' })
     }
 
+    const maxUploadSizeBytes = await this.ragService.getConfiguredUploadLimitBytes()
+    if (uploadedFile.size > maxUploadSizeBytes) {
+      return response.status(413).json({
+        error: `File exceeds the configured upload limit of ${Math.round(maxUploadSizeBytes / (1024 * 1024))} MB`,
+      })
+    }
+
     const randomSuffix = randomBytes(6).toString('hex')
     const sanitizedName = sanitizeFilename(uploadedFile.clientName)
 

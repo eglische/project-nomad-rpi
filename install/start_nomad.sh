@@ -1,5 +1,8 @@
 #!/bin/bash
 
+NOMAD_DIR="/opt/project-nomad"
+RTL_HELPER="${NOMAD_DIR}/prepare_rtlsdr.sh"
+
 echo "Finding Project N.O.M.A.D containers..."
 
 # -a to include all containers (running and stopped)
@@ -13,6 +16,14 @@ fi
 echo "Found the following containers:"
 echo "$containers"
 echo ""
+
+if echo "$containers" | grep -Eq '^nomad_radio$|^nomad_openwebrx$'; then
+    if [ -x "$RTL_HELPER" ]; then
+        echo "Preparing RTL-SDR host access..."
+        sudo bash "$RTL_HELPER" || echo "Warning: RTL-SDR prep script reported an issue."
+        echo ""
+    fi
+fi
 
 for container in $containers; do
     echo "Starting container: $container"

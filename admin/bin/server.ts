@@ -48,8 +48,8 @@ new Ignitor(APP_ROOT, { importer: IMPORTER })
       try {
         const ollamaService = new (await import('#services/ollama_service')).OllamaService()
         setTimeout(() => {
-          ollamaService.prewarmConfiguredChatModel().catch((error) => {
-            console.error('Error prewarming configured chat model:', error)
+          ollamaService.prewarmConfiguredModels().catch((error) => {
+            console.error('Error prewarming configured models:', error)
           })
         }, 5000)
       } catch (error) {

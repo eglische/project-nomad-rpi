@@ -46,7 +46,19 @@ SIDECAR_UPDATER_SCRIPT_URL="${GITHUB_RAW_BASE_URL}/install/sidecar-updater/updat
 START_SCRIPT_URL="${GITHUB_RAW_BASE_URL}/install/start_nomad.sh"
 STOP_SCRIPT_URL="${GITHUB_RAW_BASE_URL}/install/stop_nomad.sh"
 UPDATE_SCRIPT_URL="${GITHUB_RAW_BASE_URL}/install/update_nomad.sh"
+PREPARE_RTLSDR_SCRIPT_URL="${GITHUB_RAW_BASE_URL}/install/prepare_rtlsdr.sh"
 WAIT_FOR_IT_SCRIPT_URL="https://raw.githubusercontent.com/vishnubob/wait-for-it/master/wait-for-it.sh"
+NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION:-580.95.05}"
+NVIDIA_DRIVER_RUNFILE_URL="${NVIDIA_DRIVER_RUNFILE_URL:-https://download.nvidia.com/XFree86/Linux-aarch64/${NVIDIA_DRIVER_VERSION}/NVIDIA-Linux-aarch64-${NVIDIA_DRIVER_VERSION}.run}"
+NVIDIA_CUDA_VERSION="${NVIDIA_CUDA_VERSION:-13.0.2}"
+NVIDIA_CUDA_RUNFILE_URL="${NVIDIA_CUDA_RUNFILE_URL:-https://developer.download.nvidia.com/compute/cuda/${NVIDIA_CUDA_VERSION}/local_installers/cuda_${NVIDIA_CUDA_VERSION}_${NVIDIA_DRIVER_VERSION}_linux_sbsa.run}"
+NVIDIA_OPEN_MODULES_REPO_URL="${NVIDIA_OPEN_MODULES_REPO_URL:-https://github.com/mariobalanica/open-gpu-kernel-modules.git}"
+NVIDIA_OPEN_MODULES_BRANCH="${NVIDIA_OPEN_MODULES_BRANCH:-non-coherent-arm-fixes}"
+NVIDIA_OPEN_MODULES_COMMIT="${NVIDIA_OPEN_MODULES_COMMIT:-10072734b2f88f3580cdb036778ec27d2b4f2fb9}"
+NVIDIA_RUNTIME_CACHE_DIR="${NVIDIA_RUNTIME_CACHE_DIR:-/var/cache/project-nomad/nvidia}"
+NVIDIA_STATE_DIR="${NVIDIA_STATE_DIR:-/var/lib/project-nomad-runtime}"
+NVIDIA_APT_PIN_FILE="${NVIDIA_APT_PIN_FILE:-/etc/apt/preferences.d/nvidia-block}"
+CUDA_ENV_FILE="${CUDA_ENV_FILE:-/etc/profile.d/cuda.sh}"
 INSTALL_TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 INSTALL_LOG_DIR="${HOME}/project-nomad-install-logs"
 INSTALL_LOG_FILE="${INSTALL_LOG_DIR}/install-${INSTALL_TIMESTAMP}.log"
@@ -65,11 +77,17 @@ storage_only='false'
 skip_storage_preflight='false'
 assume_yes='false'
 format_external_disk='false'
+force_format_existing_nomad_data='false'
+reset_existing_mysql='false'
 external_device=''
 external_mount="${NOMAD_EXTERNAL_MOUNT_DEFAULT}"
 external_label="${NOMAD_EXTERNAL_LABEL_DEFAULT}"
 nomad_data_root=''
 source_repo_dir=''
+install_secrets_file=''
+app_key=''
+db_root_password=''
+db_user_password=''
 
 ###################################################################################################################################################################################################
 #                                                                                                                                                                                                 #
@@ -202,29 +220,284 @@ detect_target_platform() {
   echo -e "${GREEN}#${RESET} Detected platform: ${WHITE_R}${target_platform}${RESET} (${WHITE_R}${target_architecture}${RESET})\\n"
 }
 
-ensure_raspberry_pi_nvidia_prerequisites() {
-  if [[ "${target_platform}" != 'raspberry-pi' ]]; then
+is_raspberry_pi_5() {
+  [[ "${target_platform}" == 'raspberry-pi' ]] && grep -qi "Raspberry Pi 5" /proc/device-tree/model 2>/dev/null
+}
+
+get_pi5_kernel_override() {
+  if [[ ! -f /boot/firmware/config.txt ]]; then
+    return 0
+  fi
+
+  awk '/\[pi5\]/{f=1;next} /^\[/{f=0} f && /^kernel=/{print $0}' /boot/firmware/config.txt | tail -n1
+}
+
+stage_pi5_4k_kernel_override() {
+  local config_path='/boot/firmware/config.txt'
+  local temp_file=''
+  temp_file="$(mktemp)"
+
+  sudo cp "${config_path}" "${temp_file}"
+
+  if grep -q '^\[pi5\]' "${temp_file}"; then
+    if awk '/\[pi5\]/{f=1;next} /^\[/{f=0} f && /^kernel=kernel8\.img$/{found=1} END{exit(found?0:1)}' "${temp_file}"; then
+      rm -f "${temp_file}"
+      return 0
+    fi
+
+    if awk '/\[pi5\]/{f=1;next} /^\[/{f=0} f && /^kernel=/{found=1} END{exit(found?0:1)}' "${temp_file}"; then
+      sudo sed -i '/^\[pi5\]/,/^\[/{s/^kernel=.*/kernel=kernel8.img/}' "${temp_file}"
+    else
+      sudo sed -i '/^\[pi5\]/a kernel=kernel8.img' "${temp_file}"
+    fi
+  else
+    cat <<'EOF' | sudo tee -a "${temp_file}" >/dev/null
+
+[pi5]
+kernel=kernel8.img
+EOF
+  fi
+
+  sudo cp "${temp_file}" "${config_path}"
+  rm -f "${temp_file}"
+}
+
+has_nvidia_pci_device() {
+  command -v lspci >/dev/null 2>&1 && lspci 2>/dev/null | grep -iq 'nvidia'
+}
+
+ensure_project_runtime_state_dirs() {
+  sudo mkdir -p "${NVIDIA_RUNTIME_CACHE_DIR}" "${NVIDIA_STATE_DIR}"
+}
+
+ensure_custom_nvidia_apt_pin() {
+  if [[ "${target_platform}" != 'raspberry-pi' ]] || ! has_nvidia_pci_device; then
+    return 0
+  fi
+
+  echo -e "${YELLOW}#${RESET} Ensuring custom NVIDIA APT pin protects the Pi host driver stack...\\n"
+  cat <<'EOF' | sudo tee "${NVIDIA_APT_PIN_FILE}" >/dev/null
+Package: nvidia-*
+Pin: release *
+Pin-Priority: -1
+
+Package: libnvidia-*
+Pin: release *
+Pin-Priority: -1
+
+Package: libcuda1
+Pin: release *
+Pin-Priority: -1
+
+Package: nvidia-smi
+Pin: release *
+Pin-Priority: -1
+
+Package: firmware-nvidia-gsp
+Pin: release *
+Pin-Priority: -1
+EOF
+}
+
+ensure_cuda_environment_file() {
+  echo -e "${YELLOW}#${RESET} Ensuring CUDA environment variables are exported globally...\\n"
+  cat <<'EOF' | sudo tee "${CUDA_ENV_FILE}" >/dev/null
+export PATH="${PATH}:/usr/local/cuda-13.0/bin"
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/cuda-13.0/lib64"
+EOF
+}
+
+download_with_resume() {
+  local url="$1"
+  local destination_path="$2"
+  local description="$3"
+
+  if [[ -f "${destination_path}" && -s "${destination_path}" ]]; then
+    echo -e "${GREEN}#${RESET} Reusing existing ${description} download at ${WHITE_R}${destination_path}${RESET}.\\n"
+    return 0
+  fi
+
+  echo -e "${YELLOW}#${RESET} Downloading ${description}...\\n"
+  if ! sudo curl -fL --retry 3 --continue-at - "${url}" -o "${destination_path}"; then
+    echo -e "${RED}#${RESET} Failed to download ${description} from ${WHITE_R}${url}${RESET}."
+    exit 1
+  fi
+}
+
+ensure_raspberry_pi_nvidia_build_dependencies() {
+  if [[ "${target_platform}" != 'raspberry-pi' ]] || ! has_nvidia_pci_device; then
+    return 0
+  fi
+
+  echo -e "${YELLOW}#${RESET} Installing Raspberry Pi NVIDIA build dependencies...\\n"
+  sudo apt-get update
+  sudo apt-get install -y build-essential dkms "linux-headers-$(uname -r)" git
+}
+
+install_raspberry_pi_nvidia_driver_stack() {
+  if [[ "${target_platform}" != 'raspberry-pi' ]] || ! has_nvidia_pci_device; then
+    return 0
+  fi
+
+  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | grep -q "${NVIDIA_DRIVER_VERSION}"; then
+    echo -e "${GREEN}#${RESET} NVIDIA host driver ${WHITE_R}${NVIDIA_DRIVER_VERSION}${RESET} is already active.\\n"
+    return 0
+  fi
+
+  ensure_project_runtime_state_dirs
+  ensure_custom_nvidia_apt_pin
+  ensure_raspberry_pi_nvidia_build_dependencies
+
+  local driver_runfile="${NVIDIA_RUNTIME_CACHE_DIR}/NVIDIA-Linux-aarch64-${NVIDIA_DRIVER_VERSION}.run"
+  local module_clone_dir="${NVIDIA_RUNTIME_CACHE_DIR}/open-gpu-kernel-modules"
+  local driver_marker="${NVIDIA_STATE_DIR}/nvidia-driver-${NVIDIA_DRIVER_VERSION}.installed"
+
+  download_with_resume "${NVIDIA_DRIVER_RUNFILE_URL}" "${driver_runfile}" "NVIDIA aarch64 driver ${NVIDIA_DRIVER_VERSION}"
+  sudo chmod +x "${driver_runfile}"
+
+  if [[ ! -f "${driver_marker}" ]]; then
+    echo -e "${YELLOW}#${RESET} Installing NVIDIA userland from runfile ${WHITE_R}${NVIDIA_DRIVER_VERSION}${RESET}...\\n"
+    if ! sudo sh "${driver_runfile}" --silent --no-kernel-modules --install-libglvnd; then
+      echo -e "${RED}#${RESET} NVIDIA userland install failed."
+      exit 1
+    fi
+    sudo touch "${driver_marker}"
+  else
+    echo -e "${GREEN}#${RESET} NVIDIA userland marker present for ${WHITE_R}${NVIDIA_DRIVER_VERSION}${RESET}; skipping rerun.\\n"
+  fi
+
+  echo -e "${YELLOW}#${RESET} Preparing patched NVIDIA open kernel modules checkout...\\n"
+  if [[ -d "${module_clone_dir}/.git" ]]; then
+    sudo git -C "${module_clone_dir}" fetch --tags origin "${NVIDIA_OPEN_MODULES_BRANCH}"
+  else
+    sudo rm -rf "${module_clone_dir}"
+    sudo git clone --branch "${NVIDIA_OPEN_MODULES_BRANCH}" "${NVIDIA_OPEN_MODULES_REPO_URL}" "${module_clone_dir}"
+  fi
+  sudo git -C "${module_clone_dir}" checkout "${NVIDIA_OPEN_MODULES_COMMIT}"
+
+  local current_module_version=''
+  current_module_version="$(modinfo -F version nvidia 2>/dev/null || true)"
+  if [[ "${current_module_version}" != "${NVIDIA_DRIVER_VERSION}" ]]; then
+    echo -e "${YELLOW}#${RESET} Building patched NVIDIA kernel modules...\\n"
+    sudo make -C "${module_clone_dir}" modules -j"$(nproc)"
+    echo -e "${YELLOW}#${RESET} Installing patched NVIDIA kernel modules...\\n"
+    sudo make -C "${module_clone_dir}" modules_install -j"$(nproc)"
+    sudo depmod -a
+
+    echo -e "${YELLOW}#${RESET} Attempting to load NVIDIA kernel modules immediately...\\n"
+    sudo modprobe -r nvidia_uvm nvidia_drm nvidia_modeset nvidia 2>/dev/null || true
+    sudo modprobe nvidia || true
+    sudo modprobe nvidia_uvm || true
+  else
+    echo -e "${GREEN}#${RESET} NVIDIA kernel modules already report version ${WHITE_R}${current_module_version}${RESET}.\\n"
+  fi
+
+  if ! command -v nvidia-smi >/dev/null 2>&1 || ! nvidia-smi >/dev/null 2>&1; then
+    echo -e "${YELLOW}#${RESET} NVIDIA driver stack is installed but not yet active in the current boot."
+    echo -e "${YELLOW}#${RESET} Reboot the Pi, then rerun the installer so GPU validation can continue.\\n"
+    exit 0
+  fi
+
+  echo -e "${GREEN}#${RESET} NVIDIA host driver stack is active.\\n"
+}
+
+install_raspberry_pi_cuda_toolkit() {
+  if [[ "${target_platform}" != 'raspberry-pi' ]] || ! has_nvidia_pci_device; then
+    return 0
+  fi
+
+  if command -v nvcc >/dev/null 2>&1 && nvcc --version 2>/dev/null | grep -q "release 13.0"; then
+    echo -e "${GREEN}#${RESET} CUDA toolkit ${WHITE_R}${NVIDIA_CUDA_VERSION}${RESET} is already installed.\\n"
+    ensure_cuda_environment_file
+    return 0
+  fi
+
+  ensure_project_runtime_state_dirs
+  local cuda_runfile="${NVIDIA_RUNTIME_CACHE_DIR}/cuda_${NVIDIA_CUDA_VERSION}_${NVIDIA_DRIVER_VERSION}_linux_sbsa.run"
+  local cuda_tmpdir="${NVIDIA_RUNTIME_CACHE_DIR}/tmp"
+
+  download_with_resume "${NVIDIA_CUDA_RUNFILE_URL}" "${cuda_runfile}" "CUDA toolkit ${NVIDIA_CUDA_VERSION} SBSA runfile"
+  sudo chmod +x "${cuda_runfile}"
+  sudo mkdir -p "${cuda_tmpdir}"
+
+  echo -e "${YELLOW}#${RESET} Installing CUDA toolkit ${WHITE_R}${NVIDIA_CUDA_VERSION}${RESET} without replacing the custom NVIDIA driver...\\n"
+  if ! sudo env TMPDIR="${cuda_tmpdir}" sh "${cuda_runfile}" --silent --toolkit --override; then
+    echo -e "${RED}#${RESET} CUDA toolkit install failed."
+    exit 1
+  fi
+
+  ensure_cuda_environment_file
+
+  if ! command -v nvcc >/dev/null 2>&1; then
+    export PATH="${PATH}:/usr/local/cuda-13.0/bin"
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/cuda-13.0/lib64"
+  fi
+
+  if ! command -v nvcc >/dev/null 2>&1 || ! nvcc --version 2>/dev/null | grep -q "release 13.0"; then
+    echo -e "${RED}#${RESET} CUDA toolkit install did not expose a usable ${WHITE_R}nvcc${RESET}."
+    exit 1
+  fi
+
+  echo -e "${GREEN}#${RESET} CUDA toolkit ${WHITE_R}${NVIDIA_CUDA_VERSION}${RESET} installed successfully.\\n"
+}
+
+ensure_raspberry_pi_4k_kernel_prerequisites() {
+  if ! is_raspberry_pi_5; then
     return 0
   fi
 
   local page_size
   page_size="$(getconf PAGESIZE 2>/dev/null || true)"
   local kernel_override=''
-  if [[ -f /boot/firmware/config.txt ]]; then
-    kernel_override="$(awk '/\[pi5\]/{f=1;next} /^\[/{f=0} f && /^kernel=/{print $0}' /boot/firmware/config.txt | tail -n1)"
+  kernel_override="$(get_pi5_kernel_override)"
+
+  if [[ "${page_size}" == "4096" ]]; then
+    echo -e "${GREEN}#${RESET} Raspberry Pi 5 is already running with 4K pages.\\n"
+    return 0
   fi
 
-  if command -v nvidia-smi >/dev/null 2>&1; then
-    if [[ "$page_size" != "4096" ]]; then
-      echo -e "${RED}#${RESET} Raspberry Pi NVIDIA setup detected, but PAGE_SIZE=${page_size}. The known-good setup for this eGPU uses 4K pages."
-      echo -e "${RED}#${RESET} Set [pi5] ${WHITE_R}kernel=kernel8.img${RESET} in /boot/firmware/config.txt and reboot before continuing."
-      exit 1
-    fi
+  echo -e "${YELLOW}#${RESET} Raspberry Pi 5 detected with PAGE_SIZE=${WHITE_R}${page_size}${RESET}."
+  echo -e "${YELLOW}#${RESET} Current Project N.O.M.A.D arm64 AI path requires the 4K kernel on Pi 5."
+  echo -e "${YELLOW}#${RESET} This avoids the current Qdrant page-size crash on 16K-page kernels and is also required for the known-good NVIDIA eGPU path."
 
-    if [[ "$kernel_override" != "kernel=kernel8.img" ]]; then
-      echo -e "${YELLOW}#${RESET} Warning: NVIDIA is present, but /boot/firmware/config.txt does not explicitly set ${WHITE_R}kernel=kernel8.img${RESET} under [pi5]."
-      echo -e "${YELLOW}#${RESET} Current detected override: ${WHITE_R}${kernel_override:-<none>}${RESET}\\n"
-    fi
+  if [[ "${kernel_override}" == "kernel=kernel8.img" ]]; then
+    echo -e "${YELLOW}#${RESET} The boot config already stages ${WHITE_R}kernel=kernel8.img${RESET} under [pi5], but the system has not rebooted into it yet."
+    echo -e "${YELLOW}#${RESET} Reboot the Pi, then rerun the installer.\\n"
+    exit 0
+  fi
+
+  if ! confirm_action "Stage the Pi 5 4K kernel override now and stop so you can reboot before continuing?"; then
+    echo -e "${RED}#${RESET} Cannot continue safely on the current 16K-page Pi 5 kernel."
+    echo -e "${RED}#${RESET} Re-run the installer after setting ${WHITE_R}[pi5] kernel=kernel8.img${RESET} and rebooting."
+    exit 1
+  fi
+
+  stage_pi5_4k_kernel_override
+  echo -e "${GREEN}#${RESET} Staged ${WHITE_R}kernel=kernel8.img${RESET} under [pi5] in /boot/firmware/config.txt."
+  echo -e "${YELLOW}#${RESET} Reboot the Pi now, then rerun the installer so the 4K kernel is active.\\n"
+  exit 0
+}
+
+ensure_raspberry_pi_nvidia_prerequisites() {
+  if [[ "${target_platform}" != 'raspberry-pi' ]]; then
+    return 0
+  fi
+
+  ensure_raspberry_pi_4k_kernel_prerequisites
+  ensure_project_runtime_state_dirs
+  ensure_custom_nvidia_apt_pin
+
+  local kernel_override=''
+  kernel_override="$(get_pi5_kernel_override)"
+
+  if command -v nvidia-smi >/dev/null 2>&1 && [[ "$kernel_override" != "kernel=kernel8.img" ]]; then
+    echo -e "${YELLOW}#${RESET} Warning: NVIDIA is present, but /boot/firmware/config.txt does not explicitly set ${WHITE_R}kernel=kernel8.img${RESET} under [pi5]."
+    echo -e "${YELLOW}#${RESET} Current detected override: ${WHITE_R}${kernel_override:-<none>}${RESET}\\n"
+  fi
+
+  if has_nvidia_pci_device; then
+    install_raspberry_pi_nvidia_driver_stack
+    install_raspberry_pi_cuda_toolkit
   fi
 }
 
@@ -405,7 +678,60 @@ device_is_system_disk() {
 
 device_mountpoint() {
   local device_path="$1"
-  findmnt -nr -S "${device_path}" -o TARGET 2>/dev/null | head -n1
+  findmnt -nr -S "${device_path}" -o TARGET 2>/dev/null | head -n1 || true
+}
+
+device_label() {
+  local device_path="$1"
+  sudo blkid -s LABEL -o value "${device_path}" 2>/dev/null || true
+}
+
+device_filesystem_type() {
+  local device_path="$1"
+  sudo blkid -s TYPE -o value "${device_path}" 2>/dev/null || true
+}
+
+device_looks_like_nomad_data() {
+  local device_path="$1"
+  local detected_label=''
+  detected_label="$(device_label "${device_path}")"
+  if [[ "${detected_label}" == "${external_label}" ]]; then
+    return 0
+  fi
+
+  local fstype=''
+  fstype="$(device_filesystem_type "${device_path}")"
+  if [[ "${fstype}" != 'ext4' ]]; then
+    return 1
+  fi
+
+  local mountpoint=''
+  mountpoint="$(device_mountpoint "${device_path}")"
+  local temp_mount=''
+  local mounted_here='false'
+
+  if [[ -z "${mountpoint}" ]]; then
+    temp_mount="$(mktemp -d)"
+    if sudo mount -o ro "${device_path}" "${temp_mount}" >/dev/null 2>&1; then
+      mountpoint="${temp_mount}"
+      mounted_here='true'
+    else
+      rmdir "${temp_mount}" >/dev/null 2>&1 || true
+      return 1
+    fi
+  fi
+
+  local looks_like_nomad='false'
+  if [[ -d "${mountpoint}/project-nomad" || -d "${mountpoint}/project-nomad/storage" || -f "${mountpoint}/project-nomad/install-metadata.env" ]]; then
+    looks_like_nomad='true'
+  fi
+
+  if [[ "${mounted_here}" == 'true' ]]; then
+    sudo umount "${temp_mount}" >/dev/null 2>&1 || true
+    rmdir "${temp_mount}" >/dev/null 2>&1 || true
+  fi
+
+  [[ "${looks_like_nomad}" == 'true' ]]
 }
 
 device_hosts_active_swap() {
@@ -504,6 +830,88 @@ ensure_safe_boot_order() {
 
 refresh_nomad_data_root() {
   nomad_data_root="${external_mount}/project-nomad"
+  install_secrets_file="${nomad_data_root}/install-secrets.env"
+}
+
+directory_has_files() {
+  local directory_path="$1"
+  [[ -d "${directory_path}" ]] && find "${directory_path}" -mindepth 1 -maxdepth 1 | read -r _
+}
+
+mysql_data_present() {
+  directory_has_files "${nomad_data_root}/mysql"
+}
+
+redis_data_present() {
+  directory_has_files "${nomad_data_root}/redis"
+}
+
+backup_and_reset_mysql_data_if_requested() {
+  if [[ "${reset_existing_mysql}" != 'true' ]]; then
+    return 0
+  fi
+
+  if ! mysql_data_present; then
+    return 0
+  fi
+
+  local mysql_backup_dir="${nomad_data_root}/mysql-recovery-backup-${INSTALL_TIMESTAMP}"
+  echo -e "${YELLOW}#${RESET} Backing up existing MySQL data directory to ${WHITE_R}${mysql_backup_dir}${RESET} before initializing a fresh Nomad metadata database."
+  sudo mv "${nomad_data_root}/mysql" "${mysql_backup_dir}"
+  sudo mkdir -p "${nomad_data_root}/mysql"
+  sudo chown -R "$(whoami):$(whoami)" "${nomad_data_root}/mysql"
+}
+
+backup_and_reset_redis_data_if_requested() {
+  if [[ "${reset_existing_mysql}" != 'true' ]]; then
+    return 0
+  fi
+
+  if ! redis_data_present; then
+    return 0
+  fi
+
+  local redis_backup_dir="${nomad_data_root}/redis-recovery-backup-${INSTALL_TIMESTAMP}"
+  echo -e "${YELLOW}#${RESET} Backing up existing Redis data directory to ${WHITE_R}${redis_backup_dir}${RESET} before clearing stale BullMQ queue state."
+  sudo mv "${nomad_data_root}/redis" "${redis_backup_dir}"
+  sudo mkdir -p "${nomad_data_root}/redis"
+  sudo chown -R "$(whoami):$(whoami)" "${nomad_data_root}/redis"
+}
+
+load_or_generate_install_secrets() {
+  refresh_nomad_data_root
+
+  if [[ -f "${install_secrets_file}" ]]; then
+    # shellcheck disable=SC1090
+    source "${install_secrets_file}"
+    if [[ -n "${app_key}" && -n "${db_root_password}" && -n "${db_user_password}" ]]; then
+      echo -e "${GREEN}#${RESET} Reusing persisted install secrets from ${WHITE_R}${install_secrets_file}${RESET}."
+      return 0
+    fi
+    echo -e "${RED}#${RESET} Install secrets file ${WHITE_R}${install_secrets_file}${RESET} is present but incomplete."
+    exit 1
+  fi
+
+  if mysql_data_present && [[ "${reset_existing_mysql}" != 'true' ]]; then
+    echo -e "${RED}#${RESET} Existing MySQL recovery data was detected under ${WHITE_R}${nomad_data_root}/mysql${RESET}, but no persisted install secrets were found."
+    echo -e "${YELLOW}#${RESET} Recovery cannot safely continue because the old database volume will reject newly generated credentials."
+    echo -e "${YELLOW}#${RESET} Options:"
+    echo -e "${YELLOW}#${RESET}  1. restore/preserve the previous ${WHITE_R}install-secrets.env${RESET}, or"
+    echo -e "${YELLOW}#${RESET}  2. re-run with ${WHITE_R}--reset-existing-mysql${RESET} to keep storage content but initialize a fresh Nomad metadata database."
+    exit 1
+  fi
+
+  app_key="$(generateRandomPass)"
+  db_root_password="$(generateRandomPass)"
+  db_user_password="$(generateRandomPass)"
+
+  cat > "${install_secrets_file}" <<EOF
+app_key='${app_key}'
+db_root_password='${db_root_password}'
+db_user_password='${db_user_password}'
+EOF
+  chmod 600 "${install_secrets_file}"
+  echo -e "${GREEN}#${RESET} Persisted install secrets to ${WHITE_R}${install_secrets_file}${RESET} for future recovery installs."
 }
 
 source_install_enabled() {
@@ -610,6 +1018,7 @@ select_external_device_interactively() {
   local candidates=()
   local candidate_output=''
   local root_device=''
+  local recommended_selection=''
   root_device="$(get_root_block_device)"
 
   candidate_output="$(lsblk -rno PATH,TYPE,FSTYPE,LABEL,MOUNTPOINT,SIZE | awk '$2 == "part" { printf "%s|%s|%s|%s|%s\n", $1, $3, $4, $5, $6 }')"
@@ -636,11 +1045,20 @@ select_external_device_interactively() {
   for entry in "${candidates[@]}"; do
     IFS='|' read -r dev fstype label mountpoint size <<< "${entry}"
     local notes=()
+    local recommendation='false'
     if device_hosts_active_swap "${dev}"; then
       notes+=("active-swap")
     fi
     if [[ -n "${mountpoint}" ]]; then
       notes+=("mounted")
+    fi
+    if [[ "${label}" == "${external_label}" ]]; then
+      notes+=("nomad-label")
+      recommendation='true'
+    fi
+    if device_looks_like_nomad_data "${dev}"; then
+      notes+=("existing-nomad-data")
+      recommendation='true'
     fi
     printf "  %s) %s size=%s fstype=%s label=%s mount=%s" \
       "${index}" "${dev}" "${size:-<unknown>}" "${fstype:-<none>}" "${label:-<none>}" "${mountpoint:-<none>}"
@@ -648,6 +1066,9 @@ select_external_device_interactively() {
       printf " notes=%s" "$(IFS=,; echo "${notes[*]}")"
     fi
     printf "\n"
+    if [[ -z "${recommended_selection}" && "${recommendation}" == 'true' && ! " ${notes[*]} " =~ " active-swap " ]]; then
+      recommended_selection="${index}"
+    fi
     index=$((index + 1))
   done
 
@@ -655,10 +1076,18 @@ select_external_device_interactively() {
     echo -e "${YELLOW}#${RESET} System boot/root device detected as ${WHITE_R}${root_device}${RESET}. It is excluded from selection."
   fi
   echo -e "${YELLOW}#${RESET} Partitions with active swap should not be selected."
+  if [[ -n "${recommended_selection}" ]]; then
+    echo -e "${GREEN}#${RESET} Recommended selection: ${WHITE_R}${recommended_selection}${RESET} (existing Nomad recovery data detected)."
+  fi
 
   local selection=''
   while true; do
-    read -r -p "Enter selection number: " selection
+    if [[ -n "${recommended_selection}" ]]; then
+      read -r -p "Enter selection number [${recommended_selection}]: " selection
+      selection="${selection:-${recommended_selection}}"
+    else
+      read -r -p "Enter selection number: " selection
+    fi
     if [[ "${selection}" =~ ^[0-9]+$ ]] && (( selection >= 1 && selection <= ${#candidates[@]} )); then
       external_device="$(echo "${candidates[$((selection - 1))]}" | cut -d'|' -f1)"
       break
@@ -696,8 +1125,18 @@ configure_external_storage() {
 
   local current_fstype=''
   current_fstype="$(sudo blkid -s TYPE -o value "${external_device}" 2>/dev/null || true)"
+  local device_contains_nomad_data='false'
+  if device_looks_like_nomad_data "${external_device}"; then
+    device_contains_nomad_data='true'
+  fi
 
   if [[ "${format_external_disk}" == 'true' ]]; then
+    if [[ "${device_contains_nomad_data}" == 'true' && "${force_format_existing_nomad_data}" != 'true' ]]; then
+      echo -e "${RED}#${RESET} Refusing to format ${WHITE_R}${external_device}${RESET} because it appears to contain existing Project N.O.M.A.D recovery data."
+      echo -e "${YELLOW}#${RESET} Re-run without ${WHITE_R}--format-external-disk${RESET} to reuse it safely."
+      echo -e "${YELLOW}#${RESET} Only use ${WHITE_R}--force-format-existing-nomad-data${RESET} if you intentionally want to wipe that recovery disk."
+      exit 1
+    fi
     if ! confirm_action "Format ${external_device} as ext4 and mount it at ${external_mount}? Existing data on that partition will be lost"; then
       echo -e "${RED}#${RESET} External storage formatting was cancelled."
       exit 1
@@ -708,6 +1147,9 @@ configure_external_storage() {
     exit 1
   else
     echo -e "${YELLOW}#${RESET} Reusing existing ext4 filesystem on ${WHITE_R}${external_device}${RESET} without formatting."
+    if [[ "${device_contains_nomad_data}" == 'true' ]]; then
+      echo -e "${GREEN}#${RESET} Existing Project N.O.M.A.D data was detected on ${WHITE_R}${external_device}${RESET}; recovery-safe reuse is enabled."
+    fi
   fi
 
   echo -e "${YELLOW}#${RESET} Preparing external storage device ${WHITE_R}${external_device}${RESET} for Project N.O.M.A.D data...\\n"
@@ -743,6 +1185,8 @@ configure_external_storage() {
   sudo mkdir -p "${nomad_data_root}/storage/logs" "${nomad_data_root}/mysql" "${nomad_data_root}/redis"
   sudo touch "${nomad_data_root}/storage/logs/admin.log"
   sudo chown -R "$(whoami):$(whoami)" "${nomad_data_root}"
+  backup_and_reset_mysql_data_if_requested
+  backup_and_reset_redis_data_if_requested
 
   echo -e "${YELLOW}#${RESET} Installer note: Project N.O.M.A.D stores data on ${WHITE_R}${external_device}${RESET} but does not configure USB boot."
   echo -e "${YELLOW}#${RESET} If your Pi firmware ever prefers USB mass storage over the SD card, set Raspberry Pi boot order to prefer SD before USB."
@@ -836,11 +1280,23 @@ run_runtime_preflight_checks() {
     record_preflight_failure "Docker Compose plugin is unavailable. Re-run preinstall and inspect package installation output."
   fi
 
-  if [[ "${target_platform}" == 'raspberry-pi' ]] && command -v nvidia-smi >/dev/null 2>&1; then
+  if is_raspberry_pi_5; then
     local page_size
     page_size="$(getconf PAGESIZE 2>/dev/null || true)"
     if [[ "${page_size}" != '4096' ]]; then
-      record_preflight_failure "Raspberry Pi NVIDIA setup is not running with 4K pages. Expected 4096, got ${page_size}."
+      record_preflight_failure "Raspberry Pi 5 is not running with 4K pages. Expected 4096, got ${page_size}. Current arm64 AI services require the 4K kernel."
+    fi
+  fi
+
+  if [[ "${target_platform}" == 'raspberry-pi' ]] && has_nvidia_pci_device; then
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+      record_preflight_failure "NVIDIA GPU hardware is present, but nvidia-smi is unavailable. The Pi host driver stack did not install correctly."
+    elif ! nvidia-smi >/dev/null 2>&1; then
+      record_preflight_failure "NVIDIA GPU hardware is present, but nvidia-smi cannot talk to the driver. Reboot after the host driver/module install and rerun the installer."
+    fi
+
+    if ! command -v nvcc >/dev/null 2>&1; then
+      record_preflight_failure "NVIDIA GPU hardware is present, but the CUDA toolkit is missing. The Pi host CUDA install did not complete."
     fi
 
     if ! command -v nvidia-ctk >/dev/null 2>&1; then
@@ -1109,6 +1565,7 @@ create_nomad_directory(){
 download_management_compose_file() {
   local compose_file_path="${NOMAD_DIR}/compose.yml"
   refresh_nomad_data_root
+  load_or_generate_install_secrets
 
   echo -e "${YELLOW}#${RESET} Downloading docker-compose file for management...\\n"
   local compose_source_path=''
@@ -1119,10 +1576,6 @@ download_management_compose_file() {
   fi
   copy_or_download_file "${compose_source_path}" "${compose_url}" "${compose_file_path}" "the docker compose file"
   echo -e "${GREEN}#${RESET} Docker compose file downloaded successfully to $compose_file_path.\\n"
-
-  local app_key=$(generateRandomPass)
-  local db_root_password=$(generateRandomPass)
-  local db_user_password=$(generateRandomPass)
 
   # Inject dynamic env values into the compose file
   echo -e "${YELLOW}#${RESET} Configuring docker-compose file env variables...\\n"
@@ -1204,20 +1657,25 @@ download_helper_scripts() {
   local start_script_path="${NOMAD_DIR}/start_nomad.sh"
   local stop_script_path="${NOMAD_DIR}/stop_nomad.sh"
   local update_script_path="${NOMAD_DIR}/update_nomad.sh"
+  local prepare_rtlsdr_script_path="${NOMAD_DIR}/prepare_rtlsdr.sh"
   local start_script_source_path=''
   local stop_script_source_path=''
   local update_script_source_path=''
+  local prepare_rtlsdr_script_source_path=''
   local start_script_url="${START_SCRIPT_URL}"
   local stop_script_url="${STOP_SCRIPT_URL}"
   local update_script_url="${UPDATE_SCRIPT_URL}"
+  local prepare_rtlsdr_script_url="${PREPARE_RTLSDR_SCRIPT_URL}"
 
   if source_install_enabled; then
     start_script_source_path="${source_repo_dir}/install/start_nomad.sh"
     stop_script_source_path="${source_repo_dir}/install/stop_nomad.sh"
     update_script_source_path="${source_repo_dir}/install/update_nomad.sh"
+    prepare_rtlsdr_script_source_path="${source_repo_dir}/install/prepare_rtlsdr.sh"
     start_script_url=''
     stop_script_url=''
     update_script_url=''
+    prepare_rtlsdr_script_url=''
   fi
 
   echo -e "${YELLOW}#${RESET} Downloading helper scripts...\\n"
@@ -1230,7 +1688,10 @@ download_helper_scripts() {
   copy_or_download_file "${update_script_source_path}" "${update_script_url}" "${update_script_path}" "the update script"
   chmod +x "$update_script_path"
 
-  echo -e "${GREEN}#${RESET} Helper scripts downloaded successfully to $start_script_path, $stop_script_path, and $update_script_path.\\n"
+  copy_or_download_file "${prepare_rtlsdr_script_source_path}" "${prepare_rtlsdr_script_url}" "${prepare_rtlsdr_script_path}" "the RTL-SDR preparation script"
+  chmod +x "$prepare_rtlsdr_script_path"
+
+  echo -e "${GREEN}#${RESET} Helper scripts downloaded successfully to $start_script_path, $stop_script_path, $update_script_path, and $prepare_rtlsdr_script_path.\\n"
 }
 
 start_management_containers() {
@@ -1257,6 +1718,16 @@ verify_gpu_setup() {
   echo -e "${YELLOW}===========================================${RESET}\\n"
   
   # Check if NVIDIA GPU is present
+  if is_raspberry_pi_5; then
+    local page_size=''
+    page_size="$(getconf PAGESIZE 2>/dev/null || true)"
+    if [[ "${page_size}" == '4096' ]]; then
+      echo -e "${GREEN}✓${RESET} Raspberry Pi 5 kernel page size: ${WHITE_R}${page_size}${RESET} (4K kernel active)\\n"
+    else
+      echo -e "${YELLOW}○${RESET} Raspberry Pi 5 kernel page size: ${WHITE_R}${page_size:-unknown}${RESET} (16K/default path still active; AI services may fail)\\n"
+    fi
+  fi
+
   if command -v nvidia-smi &> /dev/null; then
     local gpu_inventory=''
     if gpu_inventory="$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null)"; then
@@ -1344,6 +1815,14 @@ parse_script_args() {
         ;;
       --format-external-disk)
         format_external_disk='true'
+        shift
+        ;;
+      --force-format-existing-nomad-data)
+        force_format_existing_nomad_data='true'
+        shift
+        ;;
+      --reset-existing-mysql)
+        reset_existing_mysql='true'
         shift
         ;;
       --external-device)

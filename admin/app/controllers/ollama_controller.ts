@@ -1,11 +1,12 @@
 import { ChatService } from '#services/chat_service'
 import { OllamaService } from '#services/ollama_service'
 import { RagService } from '#services/rag_service'
+import KVStore from '#models/kv_store'
 import { modelNameSchema } from '#validators/download'
 import { chatSchema, getAvailableModelsSchema } from '#validators/ollama'
 import { inject } from '@adonisjs/core'
 import type { HttpContext } from '@adonisjs/core/http'
-import { DEFAULT_QUERY_REWRITE_MODEL, RAG_CONTEXT_LIMITS, SYSTEM_PROMPTS } from '../../constants/ollama.js'
+import { RAG_CONTEXT_LIMITS, SYSTEM_PROMPTS } from '../../constants/ollama.js'
 import logger from '@adonisjs/core/services/logger'
 import type { Message } from 'ollama'
 
@@ -44,9 +45,10 @@ export default class OllamaController {
       // If there are no system messages in the chat inject system prompts
       const hasSystemMessage = reqData.messages.some((msg) => msg.role === 'system')
       if (!hasSystemMessage) {
+        const customPrompt = await KVStore.getValue('ai.assistantContextPrompt')
         const systemPrompt = {
           role: 'system' as const,
-          content: SYSTEM_PROMPTS.default,
+          content: [SYSTEM_PROMPTS.default, customPrompt].filter(Boolean).join('\n\n'),
         }
         logger.debug('[OllamaController] Injecting system prompt')
         reqData.messages.unshift(systemPrompt)
@@ -193,6 +195,15 @@ export default class OllamaController {
     return await this.ollamaService.getModels()
   }
 
+  async runtimeStatus({}: HttpContext) {
+    return await this.ollamaService.getRuntimeStatus()
+  }
+
+  async loadModel({ request }: HttpContext) {
+    const reqData = await request.validateUsing(modelNameSchema)
+    return await this.ollamaService.loadChatModel(reqData.model)
+  }
+
   /**
    * Determines RAG context limits based on model size extracted from the model name.
    * Parses size indicators like "1b", "3b", "8b", "70b" from model names/tags.
@@ -237,17 +248,18 @@ export default class OllamaController {
         })
         .join('\n')
 
+      const helperTextModel = await this.ollamaService.getConfiguredHelperTextModel()
       const installedModels = await this.ollamaService.getModels(true)
-      const rewriteModelAvailable = installedModels?.some(model => model.name === DEFAULT_QUERY_REWRITE_MODEL)
+      const rewriteModelAvailable = installedModels?.some(model => model.name === helperTextModel)
       if (!rewriteModelAvailable) {
-        logger.warn(`[RAG] Query rewrite model "${DEFAULT_QUERY_REWRITE_MODEL}" not available. Skipping query rewriting.`)
+        logger.warn(`[RAG] Query rewrite model "${helperTextModel}" not available. Skipping query rewriting.`)
         const lastUserMessage = [...messages].reverse().find(msg => msg.role === 'user')
         return lastUserMessage?.content || null
       }
 
       // FUTURE ENHANCEMENT: allow the user to specify which model to use for rewriting
       const response = await this.ollamaService.chat({
-        model: DEFAULT_QUERY_REWRITE_MODEL,
+        model: helperTextModel,
         messages: [
           {
             role: 'system',

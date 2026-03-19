@@ -16,6 +16,26 @@
 
 Project N.O.M.A.D. is a self-contained, offline-first knowledge and education server packed with critical tools, knowledge, and AI to keep you informed and empowered—anytime, anywhere.
 
+## About This Fork
+This repository is a work-in-progress fork of the original Project N.O.M.A.D. focused on extending, hardening, and adapting the original project for more varied field hardware and recovery scenarios while preserving the core browser-first offline stack.
+
+The original project vision and built-in modules remain intact. This fork is primarily aimed at improving deployment flexibility, hardware enablement, and operational resilience.
+
+**Current fork focus areas include:**
+- **Raspberry Pi 5 + ARM64 support** — installer and service logic adapted for Pi-first deployments
+- **External storage aware installs** — optional USB/HDD-backed service data so large libraries and models do not have to live on TF/SD storage
+- **NVIDIA eGPU / CUDA path on Pi 5** — work-in-progress installer automation for supported Pi 5 + NVIDIA inference setups
+- **Recovery-aware installs** — preserved content and service data can be detected and re-imported instead of being silently overwritten
+- **Improved diagnostics and reconciliation** — frontend-visible health, activity, and repair tooling for recovery and maintenance
+- **Expanded offline radio tooling** — containerized SDR-backed Radio and Spectrum Analyzer services for RTL-SDR based listening and analysis
+
+**Hardware paths this fork is opening up:**
+- standard x86 Debian/Ubuntu systems
+- Raspberry Pi 5 ARM64 systems
+- Pi 5 systems using external USB/HDD storage for large datasets and models
+- Pi 5 + compatible NVIDIA eGPU setups for local Ollama inference
+- RTL-SDR based radio and spectrum analysis attachments
+
 ## Installation & Quickstart
 Project N.O.M.A.D. can be installed on any Debian-based operating system (we recommend Ubuntu). Installation is completely terminal-based, and all tools and resources are designed to be accessed through the browser, so there's no need for a desktop environment if you'd rather setup N.O.M.A.D. as a "server" and access it through other clients.
 

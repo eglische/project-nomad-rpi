@@ -23,6 +23,7 @@ RED='\033[1;31m' # Light Red.
 GREEN='\033[1;32m' # Light Green.
 NOMAD_DIR="/opt/project-nomad"
 INSTALL_METADATA_FILE="${NOMAD_DIR}/install-metadata.env"
+PREPARE_RTLSDR_SCRIPT_PATH="${NOMAD_DIR}/prepare_rtlsdr.sh"
 
 github_repo_owner=''
 github_repo_name=''
@@ -142,6 +143,13 @@ refresh_local_source_checkout() {
   fi
 }
 
+refresh_helper_scripts() {
+  if [[ -n "${source_repo_dir}" && -f "${source_repo_dir}/install/prepare_rtlsdr.sh" ]]; then
+    cp "${source_repo_dir}/install/prepare_rtlsdr.sh" "${PREPARE_RTLSDR_SCRIPT_PATH}"
+    chmod +x "${PREPARE_RTLSDR_SCRIPT_PATH}"
+  fi
+}
+
 force_recreate() {
   local compose_file="${NOMAD_DIR}/compose.yml"
 
@@ -207,5 +215,6 @@ get_update_confirmation
 ensure_docker_installed_and_running
 ensure_docker_compose_file_exists
 force_recreate
+refresh_helper_scripts
 get_local_ip
 success_message

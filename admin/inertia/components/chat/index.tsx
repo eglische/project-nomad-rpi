@@ -10,10 +10,12 @@ import { useNotifications } from '~/context/NotificationContext'
 import { ChatMessage } from '../../../types/chat'
 import classNames from '~/lib/classNames'
 import { IconX } from '@tabler/icons-react'
-import { DEFAULT_QUERY_REWRITE_MODEL } from '../../../constants/ollama'
 import { useSystemSetting } from '~/hooks/useSystemSetting'
 import useDownloads from '~/hooks/useDownloads'
 import useEmbedJobs from '~/hooks/useEmbedJobs'
+
+const DEFAULT_HELPER_TEXT_MODEL = 'qwen2.5:3b'
+const DEFAULT_HELPER_EMBEDDING_MODEL = 'nomic-embed-text:v1.5'
 
 interface ChatProps {
   enabled: boolean
@@ -36,6 +38,11 @@ export default function Chat({
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [selectedModel, setSelectedModel] = useState<string>('')
+  const [activeChatModel, setActiveChatModel] = useState<string>('')
+  const [pendingLoadModel, setPendingLoadModel] = useState<string | null>(null)
+  const [loadStartedAt, setLoadStartedAt] = useState<number | null>(null)
+  const [loadBaselineGpuBytes, setLoadBaselineGpuBytes] = useState<number | null>(null)
+  const [loadMinObservedGpuBytes, setLoadMinObservedGpuBytes] = useState<number | null>(null)
   const [isStreamingResponse, setIsStreamingResponse] = useState(false)
   const streamAbortRef = useRef<AbortController | null>(null)
 
@@ -60,12 +67,28 @@ export default function Chat({
 
   const { data: lastModelSetting } = useSystemSetting({ key: 'chat.lastModel', enabled })
   const { data: chatFoldersSetting } = useSystemSetting({ key: 'chat.folders', enabled })
+  const { data: defaultChatModelSetting } = useSystemSetting({ key: 'ollama.defaultChatModel', enabled })
+  const { data: helperTextModelSetting } = useSystemSetting({ key: 'ollama.helperTextModel', enabled })
+  const { data: helperEmbeddingModelSetting } = useSystemSetting({ key: 'ollama.helperEmbeddingModel', enabled })
 
   const { data: installedModels = [], isLoading: isLoadingModels } = useQuery({
     queryKey: ['installedModels'],
     queryFn: () => api.getInstalledModels(),
     enabled,
+    refetchInterval: 5000,
     select: (data) => data || [],
+  })
+  const { data: runtimeStatus } = useQuery({
+    queryKey: ['ollamaRuntimeStatus'],
+    queryFn: () => api.getOllamaRuntimeStatus(),
+    enabled,
+    refetchInterval: pendingLoadModel ? 500 : 2000,
+  })
+  const { data: systemActivity } = useQuery({
+    queryKey: ['system-activity', 'chat'],
+    queryFn: () => api.getSystemActivity(),
+    enabled,
+    refetchInterval: 2000,
   })
   const { data: activeDownloads = [] } = useDownloads({ enabled })
   const { data: activeEmbedJobs = [] } = useEmbedJobs({ enabled })
@@ -82,8 +105,18 @@ export default function Chat({
   })
 
   const rewriteModelAvailable = useMemo(() => {
-    return installedModels.some(model => model.name === DEFAULT_QUERY_REWRITE_MODEL)
-  }, [installedModels])
+    const helperTextModel =
+      typeof helperTextModelSetting?.value === 'string' && helperTextModelSetting.value
+        ? helperTextModelSetting.value
+        : 'qwen2.5:3b'
+    return installedModels.some((model) => model.name === helperTextModel)
+  }, [installedModels, helperTextModelSetting])
+
+  const rewriteModelName = useMemo(() => {
+    return typeof helperTextModelSetting?.value === 'string' && helperTextModelSetting.value
+      ? helperTextModelSetting.value
+      : 'qwen2.5:3b'
+  }, [helperTextModelSetting])
 
   const folders = useMemo(() => {
     const raw = chatFoldersSetting?.value
@@ -180,24 +213,219 @@ export default function Chat({
     },
   })
 
+  const loadModelMutation = useMutation({
+    onMutate: (model) => {
+      setPendingLoadModel(model)
+      setLoadStartedAt(Date.now())
+      setLoadBaselineGpuBytes(runtimeStatus?.gpuMemoryUsedBytes ?? 0)
+      setLoadMinObservedGpuBytes(runtimeStatus?.gpuMemoryUsedBytes ?? 0)
+    },
+    mutationFn: async (model: string) => {
+      const response = await api.loadOllamaModel(model)
+      if (!response?.success) {
+        throw new Error(response?.message || 'Failed to load model')
+      }
+      await api.updateSetting('chat.lastModel', model)
+      return response
+    },
+    onSuccess: async (_response, model) => {
+      setPendingLoadModel(null)
+      setLoadStartedAt(null)
+      setLoadBaselineGpuBytes(null)
+      setLoadMinObservedGpuBytes(null)
+      setActiveChatModel(model)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['system-setting', 'chat.lastModel'] }),
+        queryClient.invalidateQueries({ queryKey: ['ollamaRuntimeStatus'] }),
+      ])
+      addNotification({
+        type: 'success',
+        message: `${model} is now loaded for chat.`,
+      })
+    },
+    onError: (error) => {
+      setPendingLoadModel(null)
+      setLoadStartedAt(null)
+      setLoadBaselineGpuBytes(null)
+      setLoadMinObservedGpuBytes(null)
+      addNotification({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Failed to load chat model.',
+      })
+    },
+  })
+
+  const selectedInstalledModel = useMemo(
+    () => installedModels.find((model) => model.name === selectedModel),
+    [installedModels, selectedModel]
+  )
+
+  const selectedLoadedModel = useMemo(
+    () => runtimeStatus?.loadedModels.find((model) => model.name === selectedModel),
+    [runtimeStatus, selectedModel]
+  )
+
+  const helperModelNames = useMemo(() => {
+    const helperNames = new Set<string>()
+    if (typeof helperTextModelSetting?.value === 'string' && helperTextModelSetting.value) {
+      helperNames.add(helperTextModelSetting.value)
+    } else {
+      helperNames.add(DEFAULT_HELPER_TEXT_MODEL)
+    }
+
+    if (typeof helperEmbeddingModelSetting?.value === 'string' && helperEmbeddingModelSetting.value) {
+      helperNames.add(helperEmbeddingModelSetting.value)
+    } else {
+      helperNames.add(DEFAULT_HELPER_EMBEDDING_MODEL)
+    }
+
+    return helperNames
+  }, [helperEmbeddingModelSetting, helperTextModelSetting])
+
+  const activeLoadedChatModel = useMemo(() => {
+    const loadedNonHelperModels =
+      runtimeStatus?.loadedModels.filter((model) => !helperModelNames.has(model.name)) || []
+
+    if (loadedNonHelperModels.length === 0) {
+      return ''
+    }
+
+    if (pendingLoadModel) {
+      const pendingLoaded = loadedNonHelperModels.find((model) => model.name === pendingLoadModel)
+      if (pendingLoaded) {
+        return pendingLoaded.name
+      }
+    }
+
+    const lastModel = typeof lastModelSetting?.value === 'string' ? lastModelSetting.value : ''
+    const lastLoaded = loadedNonHelperModels.find((model) => model.name === lastModel)
+    if (lastLoaded) {
+      return lastLoaded.name
+    }
+
+    return loadedNonHelperModels[0].name
+  }, [helperModelNames, lastModelSetting, pendingLoadModel, runtimeStatus])
+
+  useEffect(() => {
+    if (!pendingLoadModel) {
+      return
+    }
+
+    const currentGpuBytes = runtimeStatus?.gpuMemoryUsedBytes
+    if (typeof currentGpuBytes !== 'number') {
+      return
+    }
+
+    setLoadMinObservedGpuBytes((previous) => {
+      if (previous === null) {
+        return currentGpuBytes
+      }
+      return Math.min(previous, currentGpuBytes)
+    })
+  }, [pendingLoadModel, runtimeStatus])
+
+  const activeModelDownload = useMemo(
+    () =>
+      systemActivity?.modelDownloads.activeJobs.find((job) => job.label === selectedModel) ||
+      systemActivity?.modelDownloads.queuedJobs.find((job) => job.label === selectedModel),
+    [selectedModel, systemActivity]
+  )
+
+  const modelLoadingStatus = useMemo(() => {
+    if (!selectedModel) {
+      return null
+    }
+
+    if (activeModelDownload) {
+      return {
+        text: `Downloading ${selectedModel} (${Math.max(0, Math.min(100, Math.round(activeModelDownload.progress || 0)))}%)`,
+        progress: Math.max(0, Math.min(100, Math.round(activeModelDownload.progress || 0))),
+        mode: 'determinate' as const,
+      }
+    }
+
+    if (!(isStreamingResponse || chatMutation.isPending || loadModelMutation.isPending)) {
+      return null
+    }
+
+    if (!selectedInstalledModel || selectedLoadedModel) {
+      return null
+    }
+
+    const elapsedMs = loadStartedAt ? Date.now() - loadStartedAt : 0
+    const unloadingOldModel =
+      !!activeLoadedChatModel && activeLoadedChatModel !== selectedModel
+    const currentGpuBytes = runtimeStatus?.gpuMemoryUsedBytes ?? loadBaselineGpuBytes ?? 0
+    const baselineGpuBytes = loadBaselineGpuBytes ?? currentGpuBytes
+    const lowWaterGpuBytes = loadMinObservedGpuBytes ?? Math.min(baselineGpuBytes, currentGpuBytes)
+    const expectedModelBytes = Math.max(
+      selectedInstalledModel.size || 0,
+      selectedLoadedModel?.sizeVramBytes || 0
+    )
+
+    let progress = unloadingOldModel
+      ? Math.max(8, Math.min(38, 8 + Math.round(elapsedMs / 180)))
+      : Math.max(42, Math.min(92, 42 + Math.round(elapsedMs / 180)))
+
+    if (!unloadingOldModel && expectedModelBytes > 0) {
+      const growthBytes = Math.max(0, currentGpuBytes - lowWaterGpuBytes)
+      const fillRatio = Math.max(0, Math.min(1, growthBytes / expectedModelBytes))
+      const vramProgress = Math.max(
+        45,
+        Math.min(94, 45 + Math.round(fillRatio * 49))
+      )
+      progress = Math.max(progress, vramProgress)
+    }
+
+    return {
+      text: unloadingOldModel
+        ? `Unloading ${activeLoadedChatModel} and preparing ${selectedModel}...`
+        : `Loading ${selectedModel} for inference...`,
+      progress,
+      mode: 'determinate' as const,
+    }
+  }, [
+    activeLoadedChatModel,
+    activeModelDownload,
+    chatMutation.isPending,
+    loadBaselineGpuBytes,
+    loadMinObservedGpuBytes,
+    loadStartedAt,
+    loadModelMutation.isPending,
+    isStreamingResponse,
+    runtimeStatus,
+    selectedInstalledModel,
+    selectedLoadedModel,
+    selectedModel,
+  ])
+
   // Set default model: prefer last used model, fall back to first installed if last model not available
   useEffect(() => {
     if (installedModels.length > 0 && !selectedModel) {
       const lastModel = lastModelSetting?.value as string | undefined
-      if (lastModel && installedModels.some((m) => m.name === lastModel)) {
-        setSelectedModel(lastModel)
-      } else {
-        setSelectedModel(installedModels[0].name)
+      const defaultModel = defaultChatModelSetting?.value as string | undefined
+      const currentModel =
+        lastModel && installedModels.some((m) => m.name === lastModel)
+          ? lastModel
+          : defaultModel && installedModels.some((m) => m.name === defaultModel)
+            ? defaultModel
+            : installedModels[0].name
+
+      setSelectedModel(currentModel)
+      setActiveChatModel(currentModel)
+    }
+  }, [installedModels, selectedModel, lastModelSetting, defaultChatModelSetting])
+
+  useEffect(() => {
+    const lastModel = typeof lastModelSetting?.value === 'string' ? lastModelSetting.value : ''
+    const runtimeModel = activeLoadedChatModel || lastModel
+    if (runtimeModel && installedModels.some((model) => model.name === runtimeModel)) {
+      setActiveChatModel(runtimeModel)
+      if (!selectedModel) {
+        setSelectedModel(runtimeModel)
       }
     }
-  }, [installedModels, selectedModel, lastModelSetting])
-
-  // Persist model selection
-  useEffect(() => {
-    if (selectedModel) {
-      api.updateSetting('chat.lastModel', selectedModel)
-    }
-  }, [selectedModel])
+  }, [activeLoadedChatModel, installedModels, lastModelSetting, selectedModel])
 
   const handleNewChat = useCallback(() => {
     // Just clear the active session and messages - don't create a session yet
@@ -385,13 +613,15 @@ export default function Chat({
     [installedModels, queryClient]
   )
 
+  const currentChatModel = activeChatModel || selectedModel || 'llama3.2'
+
   const handleSendMessage = useCallback(
     async (content: string) => {
       let sessionId = activeSessionId
 
       // Create a new session if none exists
       if (!sessionId) {
-        const newSession = await api.createChatSession('New Chat', selectedModel, null, sessions.length)
+        const newSession = await api.createChatSession('New Chat', currentChatModel, null, sessions.length)
         if (newSession) {
           sessionId = newSession.id
           setActiveSessionId(sessionId)
@@ -433,7 +663,7 @@ export default function Chat({
 
         try {
           await api.streamChatMessage(
-            { model: selectedModel || 'llama3.2', messages: chatMessages, stream: true, sessionId: sessionId ? Number(sessionId) : undefined },
+            { model: currentChatModel, messages: chatMessages, stream: true, sessionId: sessionId ? Number(sessionId) : undefined },
             (chunkContent, chunkThinking, done) => {
               if (chunkThinking.length > 0 && thinkingStartTime === null) {
                 thinkingStartTime = Date.now()
@@ -521,13 +751,13 @@ export default function Chat({
       } else {
         // Non-streaming (legacy) path
         chatMutation.mutate({
-          model: selectedModel || 'llama3.2',
+          model: currentChatModel,
           messages: chatMessages,
           sessionId: sessionId ? Number(sessionId) : undefined,
         })
       }
     },
-    [activeSessionId, messages, selectedModel, chatMutation, queryClient, streamingEnabled]
+    [activeSessionId, messages, currentChatModel, chatMutation, queryClient, sessions.length, streamingEnabled]
   )
 
   return (
@@ -558,6 +788,26 @@ export default function Chat({
             {activeSession?.title || 'New Chat'}
           </h2>
           <div className="flex items-center gap-4">
+            {modelLoadingStatus && (
+              <div className="min-w-[16rem] rounded-xl border border-sky-200/80 bg-sky-100/70 px-3 py-2 text-xs font-medium text-sky-950 shadow-sm backdrop-blur-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <span>{modelLoadingStatus.text}</span>
+                  {modelLoadingStatus.mode === 'determinate' && (
+                    <span>{modelLoadingStatus.progress}%</span>
+                  )}
+                </div>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-sky-200/80">
+                  {modelLoadingStatus.mode === 'determinate' ? (
+                    <div
+                      className="h-full rounded-full bg-sky-500 transition-all duration-500"
+                      style={{ width: `${modelLoadingStatus.progress}%` }}
+                    />
+                  ) : (
+                    <div className="h-full w-1/3 rounded-full bg-sky-500/90 animate-[pulse_1.2s_ease-in-out_infinite]" />
+                  )}
+                </div>
+              </div>
+            )}
             {backgroundInferenceWarning && (
               <div className="max-w-sm rounded-xl border border-amber-200/80 bg-amber-100/65 px-3 py-2 text-xs font-medium text-amber-900 shadow-sm backdrop-blur-sm">
                 {backgroundInferenceWarning}
@@ -585,7 +835,43 @@ export default function Chat({
                   ))}
                 </select>
               )}
+              {!isLoadingModels && installedModels.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => loadModelMutation.mutate(selectedModel)}
+                  disabled={
+                    !selectedModel ||
+                    loadModelMutation.isPending ||
+                    selectedModel === activeLoadedChatModel
+                  }
+                  className={classNames(
+                    'rounded-lg px-3 py-1.5 text-sm font-medium transition-colors',
+                    !selectedModel || loadModelMutation.isPending || selectedModel === activeLoadedChatModel
+                      ? 'cursor-not-allowed bg-gray-200 text-gray-500'
+                      : 'bg-desert-green text-white hover:bg-desert-green/90'
+                  )}
+                >
+                  {loadModelMutation.isPending ? 'Loading...' : 'Load'}
+                </button>
+              )}
             </div>
+            {(pendingLoadModel || activeLoadedChatModel || activeChatModel) && (
+              <div className="rounded-lg border border-gray-200 bg-white/80 px-3 py-1.5 text-xs text-gray-600">
+                {pendingLoadModel && !selectedLoadedModel ? (
+                  <>
+                    Loading target:{' '}
+                    <span className="font-medium text-gray-800">{pendingLoadModel}</span>
+                  </>
+                ) : (
+                  <>
+                    Active:{' '}
+                    <span className="font-medium text-gray-800">
+                      {activeLoadedChatModel || activeChatModel}
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
             {isInModal && (
               <button
                 onClick={() => {
@@ -608,6 +894,7 @@ export default function Chat({
           chatSuggestionsEnabled={suggestionsEnabled}
           chatSuggestionsLoading={chatSuggestionsLoading}
           rewriteModelAvailable={rewriteModelAvailable}
+          rewriteModelName={rewriteModelName}
         />
       </div>
     </div>

@@ -43,6 +43,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=production-deps /app/node_modules /app/node_modules
 COPY --from=build /app/build /app
+COPY --from=build /app/resources/service-builds /app/resources/service-builds
 # Copy root package.json for version info
 COPY package.json /app/version.json
 COPY admin/docs /app/docs

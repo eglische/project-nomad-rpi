@@ -7,7 +7,6 @@ import ChatAssistantAvatar from './ChatAssistantAvatar'
 import BouncingDots from '../BouncingDots'
 import StyledModal from '../StyledModal'
 import api from '~/lib/api'
-import { DEFAULT_QUERY_REWRITE_MODEL } from '../../../constants/ollama'
 import { useNotifications } from '~/context/NotificationContext'
 import { usePage } from '@inertiajs/react'
 
@@ -19,6 +18,7 @@ interface ChatInterfaceProps {
   chatSuggestionsEnabled?: boolean
   chatSuggestionsLoading?: boolean
   rewriteModelAvailable?: boolean
+  rewriteModelName?: string
 }
 
 export default function ChatInterface({
@@ -28,7 +28,8 @@ export default function ChatInterface({
   chatSuggestions = [],
   chatSuggestionsEnabled = false,
   chatSuggestionsLoading = false,
-  rewriteModelAvailable = false
+  rewriteModelAvailable = false,
+  rewriteModelName = 'qwen2.5:3b',
 }: ChatInterfaceProps) {
   const { aiAssistantName } = usePage<{ aiAssistantName: string }>().props
   const { addNotification } = useNotifications()
@@ -41,7 +42,7 @@ export default function ChatInterface({
   const handleDownloadModel = async () => {
     setIsDownloading(true)
     try {
-      await api.downloadModel(DEFAULT_QUERY_REWRITE_MODEL)
+      await api.downloadModel(rewriteModelName)
       addNotification({ type: 'success', message: 'Model download queued' })
     } catch (error) {
       addNotification({ type: 'error', message: 'Failed to queue model download' })
@@ -188,7 +189,7 @@ export default function ChatInterface({
         </form>
         {!rewriteModelAvailable && (
           <div className="text-sm text-gray-500 mt-2">
-            The {DEFAULT_QUERY_REWRITE_MODEL} model is not installed. Consider{' '}
+            The {rewriteModelName} model is not installed. Consider{' '}
             <button
               onClick={() => setDownloadDialogOpen(true)}
               className="text-desert-green underline hover:text-desert-green/80 cursor-pointer"
@@ -200,7 +201,7 @@ export default function ChatInterface({
         )}
         <StyledModal
           open={downloadDialogOpen}
-          title={`Download ${DEFAULT_QUERY_REWRITE_MODEL}?`}
+          title={`Download ${rewriteModelName}?`}
           confirmText="Download"
           cancelText="Cancel"
           confirmIcon='IconDownload'
@@ -212,7 +213,7 @@ export default function ChatInterface({
         >
           <p className="text-gray-700">
             This will dispatch a background download job for{' '}
-            <span className="font-mono font-medium">{DEFAULT_QUERY_REWRITE_MODEL}</span> and may take some time to complete. The model
+            <span className="font-mono font-medium">{rewriteModelName}</span> and may take some time to complete. The model
             will be used to rewrite queries for improved RAG retrieval performance.
           </p>
         </StyledModal>

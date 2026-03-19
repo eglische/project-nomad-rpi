@@ -4,6 +4,7 @@ import { SystemUpdateService } from '#services/system_update_service'
 import { ContainerRegistryService } from '#services/container_registry_service'
 import { ActivityService } from '#services/activity_service'
 import { ReconciliationService } from '#services/reconciliation_service'
+import { RecoveryService } from '#services/recovery_service'
 import { CheckServiceUpdatesJob } from '#jobs/check_service_updates_job'
 import { affectServiceValidator, checkLatestVersionValidator, installServiceValidator, subscribeToReleaseNotesValidator, updateServiceValidator } from '#validators/system';
 import { inject } from '@adonisjs/core'
@@ -17,7 +18,8 @@ export default class SystemController {
         private systemUpdateService: SystemUpdateService,
         private containerRegistryService: ContainerRegistryService,
         private activityService: ActivityService,
-        private reconciliationService: ReconciliationService
+        private reconciliationService: ReconciliationService,
+        private recoveryService: RecoveryService
     ) { }
 
     async getInternetStatus({ }: HttpContext) {
@@ -34,6 +36,20 @@ export default class SystemController {
 
     async getDiagnostics({ }: HttpContext) {
         return await this.reconciliationService.getDiagnostics()
+    }
+
+    async getRecovery({}: HttpContext) {
+        return await this.recoveryService.scan()
+    }
+
+    async importRecovery({ request, response }: HttpContext) {
+        const body = request.body()
+        const serviceNames = Array.isArray(body?.service_names)
+            ? body.service_names.filter((value: unknown): value is string => typeof value === 'string')
+            : []
+
+        const result = await this.recoveryService.importServices(serviceNames)
+        response.send(result)
     }
 
     async reconcile({ response }: HttpContext) {
@@ -78,6 +94,18 @@ export default class SystemController {
                 ? 'Download repair completed.'
                 : 'No failed download jobs needed action.',
             actions,
+        })
+    }
+
+    async clearFailedJobs({ response }: HttpContext) {
+        const result = await this.reconciliationService.clearFailedJobs(200)
+
+        response.send({
+            success: true,
+            message: result.cleared > 0
+                ? 'Cleared persistent failed jobs.'
+                : 'No failed jobs were available to clear.',
+            actions: result.actions,
         })
     }
 

@@ -4,7 +4,7 @@ import logger from '@adonisjs/core/services/logger'
 import { DateTime } from 'luxon'
 import { inject } from '@adonisjs/core'
 import { OllamaService } from './ollama_service.js'
-import { DEFAULT_QUERY_REWRITE_MODEL, SYSTEM_PROMPTS } from '../../constants/ollama.js'
+import { SYSTEM_PROMPTS } from '../../constants/ollama.js'
 import { toTitleCase } from '../utils/misc.js'
 
 @inject()
@@ -263,7 +263,8 @@ export class ChatService {
   async generateTitle(sessionId: number, userMessage: string, assistantMessage: string) {
     try {
       const models = await this.ollamaService.getModels()
-      const titleModelAvailable = models?.some((m) => m.name === DEFAULT_QUERY_REWRITE_MODEL)
+      const helperTextModel = await this.ollamaService.getConfiguredHelperTextModel()
+      const titleModelAvailable = models?.some((m) => m.name === helperTextModel)
 
       let title: string
 
@@ -271,7 +272,7 @@ export class ChatService {
         title = userMessage.slice(0, 57) + (userMessage.length > 57 ? '...' : '')
       } else {
         const response = await this.ollamaService.chat({
-          model: DEFAULT_QUERY_REWRITE_MODEL,
+          model: helperTextModel,
           messages: [
             { role: 'system', content: SYSTEM_PROMPTS.title_generation },
             { role: 'user', content: userMessage },

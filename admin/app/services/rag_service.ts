@@ -12,6 +12,7 @@ import { OllamaService } from './ollama_service.js'
 import { SERVICE_NAMES } from '../../constants/service_names.js'
 import { removeStopwords } from 'stopword'
 import { randomUUID } from 'node:crypto'
+import { mkdir } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import KVStore from '#models/kv_store'
 import { ZIMExtractionService } from './zim_extraction_service.js'
@@ -24,6 +25,7 @@ export class RagService {
   private qdrantInitPromise: Promise<void> | null = null
   private embeddingModelVerified = false
   public static UPLOADS_STORAGE_PATH = 'storage/kb_uploads'
+  public static IMPORTS_STORAGE_PATH = 'storage/kb_imports'
   public static CONTENT_COLLECTION_NAME = 'nomad_knowledge_base'
   public static EMBEDDING_MODEL = 'nomic-embed-text:v1.5'
   public static EMBEDDING_DIMENSION = 768 // Nomic Embed Text v1.5 dimension is 768
@@ -59,6 +61,31 @@ export class RagService {
     if (!this.qdrant) {
       await this._initializeQdrantClient()
     }
+  }
+
+  private async getEmbeddingModelName(): Promise<string> {
+    return (await KVStore.getValue('ollama.helperEmbeddingModel')) || RagService.EMBEDDING_MODEL
+  }
+
+  public async getConfiguredUploadLimitMb(): Promise<number> {
+    const rawLimit = await KVStore.getValue('rag.maxUploadSizeMb')
+    const parsed = Number.parseInt(rawLimit || '', 10)
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed
+    }
+    return 250
+  }
+
+  public async getConfiguredUploadLimitBytes(): Promise<number> {
+    return (await this.getConfiguredUploadLimitMb()) * 1024 * 1024
+  }
+
+  public async getConfiguredWatchFolderPath(): Promise<string> {
+    const rawPath = await KVStore.getValue('rag.watchFolderPath')
+    if (rawPath && rawPath.trim().length > 0) {
+      return resolve(rawPath.trim())
+    }
+    return resolve(join(process.cwd(), RagService.IMPORTS_STORAGE_PATH))
   }
 
   private async _ensureCollection(
@@ -245,17 +272,18 @@ export class RagService {
 
       if (!this.embeddingModelVerified) {
         const allModels = await this.ollamaService.getModels(true)
-        const embeddingModel = allModels.find((model) => model.name === RagService.EMBEDDING_MODEL)
+        const embeddingModelName = await this.getEmbeddingModelName()
+        const embeddingModel = allModels.find((model) => model.name === embeddingModelName)
 
         if (!embeddingModel) {
           try {
-            const downloadResult = await this.ollamaService.downloadModel(RagService.EMBEDDING_MODEL)
+            const downloadResult = await this.ollamaService.downloadModel(embeddingModelName)
             if (!downloadResult.success) {
               throw new Error(downloadResult.message || 'Unknown error during model download')
             }
           } catch (modelError) {
             logger.error(
-              `[RAG] Embedding model ${RagService.EMBEDDING_MODEL} not found locally and failed to download:`,
+              `[RAG] Embedding model ${embeddingModelName} not found locally and failed to download:`,
               modelError
             )
             this.embeddingModelVerified = false
@@ -317,11 +345,12 @@ export class RagService {
       for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
         const batchStart = batchIdx * batchSize
         const batch = prefixedChunks.slice(batchStart, batchStart + batchSize)
+        const embeddingModelName = await this.getEmbeddingModelName()
 
         logger.debug(`[RAG] Embedding batch ${batchIdx + 1}/${totalBatches} (${batch.length} chunks)`)
 
         const response = await ollamaClient.embed({
-          model: RagService.EMBEDDING_MODEL,
+          model: embeddingModelName,
           input: batch,
         })
 
@@ -692,11 +721,12 @@ export class RagService {
 
       if (!this.embeddingModelVerified) {
         const allModels = await this.ollamaService.getModels(true)
-        const embeddingModel = allModels.find((model) => model.name === RagService.EMBEDDING_MODEL)
+        const embeddingModelName = await this.getEmbeddingModelName()
+        const embeddingModel = allModels.find((model) => model.name === embeddingModelName)
 
         if (!embeddingModel) {
           logger.warn(
-            `[RAG] ${RagService.EMBEDDING_MODEL} not found. Cannot perform similarity search.`
+            `[RAG] ${embeddingModelName} not found. Cannot perform similarity search.`
           )
           this.embeddingModelVerified = false
           return []
@@ -730,7 +760,7 @@ export class RagService {
       }
 
       const response = await ollamaClient.embed({
-        model: RagService.EMBEDDING_MODEL,
+        model: await this.getEmbeddingModelName(),
         input: [prefixedQuery],
       })
 
@@ -1082,9 +1112,13 @@ export class RagService {
       logger.info('[RAG] Starting knowledge base sync scan')
 
       const KB_UPLOADS_PATH = join(process.cwd(), RagService.UPLOADS_STORAGE_PATH)
+      const WATCH_FOLDER_PATH = await this.getConfiguredWatchFolderPath()
       const ZIM_PATH = join(process.cwd(), ZIM_STORAGE_PATH)
 
       const filesInStorage: string[] = []
+
+      await mkdir(KB_UPLOADS_PATH, { recursive: true })
+      await mkdir(WATCH_FOLDER_PATH, { recursive: true })
 
       // Force resync of Nomad docs
       await this.discoverNomadDocs(true).catch((error) => {
@@ -1103,6 +1137,22 @@ export class RagService {
       } catch (error) {
         if (error.code === 'ENOENT') {
           logger.debug(`[RAG] ${RagService.UPLOADS_STORAGE_PATH} directory does not exist, skipping`)
+        } else {
+          throw error
+        }
+      }
+
+      try {
+        const watchedContents = await listDirectoryContentsRecursive(WATCH_FOLDER_PATH)
+        watchedContents.forEach((entry) => {
+          if (entry.type === 'file') {
+            filesInStorage.push(entry.key)
+          }
+        })
+        logger.debug(`[RAG] Found ${watchedContents.length} files in watched import folder ${WATCH_FOLDER_PATH}`)
+      } catch (error) {
+        if (error.code === 'ENOENT') {
+          logger.debug(`[RAG] Watched import folder ${WATCH_FOLDER_PATH} does not exist, skipping`)
         } else {
           throw error
         }

@@ -2,13 +2,13 @@ import axios, { AxiosInstance } from 'axios'
 import { ListRemoteZimFilesResponse, ListZimDirectoryResponse, ListZimFilesResponse, ZimRemoteSource } from '../../types/zim'
 import { ServiceSlim } from '../../types/services'
 import { FileEntry } from '../../types/files'
-import { CheckLatestVersionResult, DiagnosticsResponse, ReconcileResponse, SystemInformationResponse, SystemUpdateStatus } from '../../types/system'
+import { CheckLatestVersionResult, DiagnosticsResponse, ReconcileResponse, RecoveryImportResponse, RecoveryScanResponse, SystemInformationResponse, SystemUpdateStatus } from '../../types/system'
 import { DownloadJobWithProgress, WikipediaState } from '../../types/downloads'
 import { EmbedJobWithProgress } from '../../types/rag'
 import { SystemActivityResponse } from '../../types/activity'
 import type { CategoryWithStatus, CollectionWithStatus, ContentUpdateCheckResult, ResourceUpdateInfo } from '../../types/collections'
 import { catchInternal } from './util'
-import { NomadOllamaModel, OllamaChatRequest } from '../../types/ollama'
+import { NomadOllamaModel, OllamaChatRequest, OllamaRuntimeStatus } from '../../types/ollama'
 import { ChatResponse, ModelResponse } from 'ollama'
 import BenchmarkResult from '#models/benchmark_result'
 import { BenchmarkType, RunBenchmarkResponse, SubmitBenchmarkResponse, UpdateBuilderTagResponse } from '../../types/benchmark'
@@ -72,6 +72,13 @@ class API {
   async downloadModel(model: string): Promise<{ success: boolean; message: string }> {
     return catchInternal(async () => {
       const response = await this.client.post('/ollama/models', { model })
+      return response.data
+    })()
+  }
+
+  async loadOllamaModel(model: string): Promise<{ success: boolean; message: string }> {
+    return catchInternal(async () => {
+      const response = await this.client.post('/ollama/load-model', { model })
       return response.data
     })()
   }
@@ -452,6 +459,22 @@ class API {
     })()
   }
 
+  async getSystemRecovery() {
+    return catchInternal(async () => {
+      const response = await this.client.get<RecoveryScanResponse>('/system/recovery')
+      return response.data
+    })()
+  }
+
+  async importRecoveredServices(serviceNames: string[]) {
+    return catchInternal(async () => {
+      const response = await this.client.post<RecoveryImportResponse>('/system/recovery/import', {
+        service_names: serviceNames,
+      })
+      return response.data
+    })()
+  }
+
   async reconcileSystem() {
     return catchInternal(async () => {
       const response = await this.client.post<ReconcileResponse>('/system/reconcile')
@@ -476,6 +499,20 @@ class API {
   async retryFailedDownloadJobs() {
     return catchInternal(async () => {
       const response = await this.client.post<ReconcileResponse>('/system/retry-failed-download-jobs')
+      return response.data
+    })()
+  }
+
+  async clearFailedJobs() {
+    return catchInternal(async () => {
+      const response = await this.client.post<ReconcileResponse>('/system/clear-failed-jobs')
+      return response.data
+    })()
+  }
+
+  async getOllamaRuntimeStatus() {
+    return catchInternal(async () => {
+      const response = await this.client.get<OllamaRuntimeStatus>('/ollama/runtime-status')
       return response.data
     })()
   }

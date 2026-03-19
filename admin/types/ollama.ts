@@ -44,3 +44,17 @@ export type OllamaChatResponse = {
   }
   done: boolean
 }
+
+export type OllamaRuntimeLoadedModel = {
+  name: string
+  size: number
+  sizeVramBytes: number
+  processor?: string
+  until?: string
+}
+
+export type OllamaRuntimeStatus = {
+  available: boolean
+  loadedModels: OllamaRuntimeLoadedModel[]
+  gpuMemoryUsedBytes: number
+}

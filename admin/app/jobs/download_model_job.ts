@@ -84,6 +84,23 @@ export class DownloadModelJob {
     const queueService = new QueueService()
     const queue = queueService.getQueue(this.queue)
     const jobId = this.getJobId(params.modelName)
+    const existing = await queue.getJob(jobId)
+
+    if (existing) {
+      const state = await existing.getState()
+
+      // Allow explicit user retries/redownloads to replace stale terminal jobs.
+      // BullMQ may return the existing completed job instead of creating a fresh one.
+      if (state === 'completed' || state === 'failed') {
+        await existing.remove()
+      } else {
+        return {
+          job: existing,
+          created: false,
+          message: `Job already exists for model ${params.modelName}`,
+        }
+      }
+    }
 
     try {
       const job = await queue.add(this.key, params, {
@@ -103,10 +120,11 @@ export class DownloadModelJob {
         message: `Dispatched model download job for ${params.modelName}`,
       }
     } catch (error) {
-      if (error.message.includes('job already exists')) {
-        const existing = await queue.getJob(jobId)
+      if (error instanceof Error && error.message.includes('job already exists')) {
+        const current = await queue.getJob(jobId)
+
         return {
-          job: existing,
+          job: current,
           created: false,
           message: `Job already exists for model ${params.modelName}`,
         }

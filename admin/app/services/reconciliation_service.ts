@@ -11,6 +11,7 @@ import axios from 'axios'
 import os from 'node:os'
 import { RunDownloadJob } from '#jobs/run_download_job'
 import { ZimService } from '#services/zim_service'
+import { RecoveryService } from '#services/recovery_service'
 import { getFileStatsIfExists } from '../utils/fs.js'
 import type { RunDownloadJobParams } from '../../types/downloads.js'
 
@@ -22,7 +23,8 @@ export class ReconciliationService {
 
   constructor(
     private dockerService: DockerService,
-    private queueService: QueueService
+    private queueService: QueueService,
+    private recoveryService: RecoveryService
   ) {}
 
   async getDiagnostics(): Promise<DiagnosticsResponse> {
@@ -58,6 +60,9 @@ export class ReconciliationService {
 
     const queues = await this.checkQueues()
     checks.push(queues)
+
+    const recovery = await this.checkRecoveryData()
+    checks.push(recovery)
 
     const summary = checks.reduce(
       (acc, check) => {
@@ -234,6 +239,41 @@ export class ReconciliationService {
     return result
   }
 
+  async clearFailedJobs(limit: number = 200): Promise<{
+    cleared: number
+    actions: string[]
+  }> {
+    const queueDefinitions = [
+      { name: 'file-embeddings', label: 'embedding' },
+      { name: 'downloads', label: 'download' },
+      { name: 'model-downloads', label: 'model download' },
+    ] as const
+
+    let cleared = 0
+    const actions: string[] = []
+
+    for (const definition of queueDefinitions) {
+      const jobs = await this.queueService
+        .getQueue(definition.name)
+        .getJobs(['failed'], 0, Math.max(0, limit - 1), false)
+
+      if (jobs.length === 0) {
+        continue
+      }
+
+      for (const job of jobs) {
+        await job.remove()
+        cleared++
+      }
+
+      actions.push(
+        `Cleared ${jobs.length} failed ${definition.label} job${jobs.length === 1 ? '' : 's'}`
+      )
+    }
+
+    return { cleared, actions }
+  }
+
   private async hasAIQueueBacklog(): Promise<boolean> {
     const embedCounts = await this.queueService.getQueue('file-embeddings').getJobCounts(
       'waiting',
@@ -255,6 +295,36 @@ export class ReconciliationService {
         (modelCounts.delayed ?? 0) >
       0
     )
+  }
+
+  private async checkRecoveryData(): Promise<DiagnosticCheck> {
+    const recovery = await this.recoveryService.scan()
+    const recoverable = recovery.services.filter((service) => service.state === 'recoverable')
+
+    if (recoverable.length === 0) {
+      return {
+        key: 'recovery-data',
+        title: 'Recovery Scan',
+        status: recovery.previousNomadDataFound ? 'ok' : 'info',
+        summary: recovery.previousNomadDataFound
+          ? 'No unimported Project N.O.M.A.D. app data was detected.'
+          : 'No previous Project N.O.M.A.D. data was detected on the current storage path.',
+        technicalDetails: [recovery.storagePath],
+      }
+    }
+
+    return {
+      key: 'recovery-data',
+      title: 'Recovery Data Available',
+      status: 'warn',
+      summary: `${recoverable.length} preserved app ${recoverable.length === 1 ? 'dataset is' : 'datasets are'} ready to reconnect.`,
+      impact: 'Recovered content may stay invisible in the UI until you import it back into Nomad.',
+      suggestedAction: 'Open the recovery menu below and reconnect the preserved services you want to keep using.',
+      technicalDetails: recoverable.flatMap((service) => [
+        `${service.friendlyName}: ${service.storagePath}`,
+        ...service.evidence.map((detail) => `${service.friendlyName}: ${detail}`),
+      ]),
+    }
   }
 
   private async checkDocker(): Promise<DiagnosticCheck> {
@@ -488,8 +558,15 @@ export class ReconciliationService {
       'failed'
     )
     const embedFailed = embedCounts.failed ?? 0
+    const modelCounts = await this.queueService.getQueue('model-downloads').getJobCounts(
+      'waiting',
+      'active',
+      'delayed',
+      'failed'
+    )
     const downloadFailed = downloadCounts.failed ?? 0
-    const failedTotal = embedFailed + downloadFailed
+    const modelFailed = modelCounts.failed ?? 0
+    const failedTotal = embedFailed + downloadFailed + modelFailed
     const backlogTotal =
       (embedCounts.waiting ?? 0) +
       (embedCounts.active ?? 0) +
@@ -497,6 +574,10 @@ export class ReconciliationService {
       (downloadCounts.waiting ?? 0) +
       (downloadCounts.active ?? 0) +
       (downloadCounts.delayed ?? 0)
+      +
+      (modelCounts.waiting ?? 0) +
+      (modelCounts.active ?? 0) +
+      (modelCounts.delayed ?? 0)
 
     if (backlogTotal === 0 && failedTotal === 0) {
       return {
@@ -515,18 +596,15 @@ export class ReconciliationService {
       impact: 'Downloads or indexing may take longer, and some items may need attention.',
       suggestedAction:
         failedTotal > 0
-          ? 'Retry failed embedding jobs after Nomad has recovered its dependencies.'
+          ? 'Retry failed jobs if the underlying service is healthy, or clear stale failures once you have reviewed them.'
           : 'Nomad will keep processing in the background.',
       technicalDetails: [
         `Embeddings: waiting=${embedCounts.waiting ?? 0}, active=${embedCounts.active ?? 0}, delayed=${embedCounts.delayed ?? 0}, failed=${embedCounts.failed ?? 0}`,
         `Downloads: waiting=${downloadCounts.waiting ?? 0}, active=${downloadCounts.active ?? 0}, delayed=${downloadCounts.delayed ?? 0}, failed=${downloadCounts.failed ?? 0}`,
+        `Model downloads: waiting=${modelCounts.waiting ?? 0}, active=${modelCounts.active ?? 0}, delayed=${modelCounts.delayed ?? 0}, failed=${modelCounts.failed ?? 0}`,
       ],
       autoFixAction:
-        downloadFailed > 0
-          ? 'retry-failed-downloads'
-          : failedTotal > 0
-            ? 'retry-failed-embeddings'
-            : 'reconcile',
+        failedTotal > 0 ? 'clear-failed-jobs' : 'reconcile',
     }
   }
 
