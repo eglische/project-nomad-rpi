@@ -1,5 +1,5 @@
 import { Head } from '@inertiajs/react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { IconAntennaBars5, IconBroadcast, IconLoader2, IconRadio } from '@tabler/icons-react'
 import { useQuery } from '@tanstack/react-query'
 import AppLayout from '~/layouts/AppLayout'
@@ -10,9 +10,13 @@ import { ServiceSlim } from '../../types/services'
 import { SERVICE_NAMES } from '../../constants/service_names'
 
 type LaunchTarget = typeof SERVICE_NAMES.RADIO | typeof SERVICE_NAMES.OPENWEBRX
+type LaunchPhase = 'installing' | 'starting' | 'waiting'
+type InlineNotice = { type: 'info' | 'error'; message: string } | null
 
 export default function RadioPage(props: { system: { services: ServiceSlim[] } }) {
   const [loadingTarget, setLoadingTarget] = useState<LaunchTarget | null>(null)
+  const [launchPhase, setLaunchPhase] = useState<LaunchPhase | null>(null)
+  const [inlineNotice, setInlineNotice] = useState<InlineNotice>(null)
   const { data: services, refetch } = useQuery({
     queryKey: ['radio-launch-services'],
     queryFn: () => api.getServices(),
@@ -28,21 +32,44 @@ export default function RadioPage(props: { system: { services: ServiceSlim[] } }
     () => services.find((service) => service.service_name === SERVICE_NAMES.OPENWEBRX) ?? null,
     [services]
   )
+  const isBusy = loadingTarget !== null
+
+  useEffect(() => {
+    if (!inlineNotice || inlineNotice.type !== 'info') return
+
+    const timeout = window.setTimeout(() => setInlineNotice(null), 5000)
+    return () => window.clearTimeout(timeout)
+  }, [inlineNotice])
 
   async function launchService(serviceName: LaunchTarget, port: number) {
     setLoadingTarget(serviceName)
+    setLaunchPhase('starting')
+    setInlineNotice(null)
     try {
       const service = services.find((entry) => entry.service_name === serviceName)
       if (!service?.installed) {
+        setLaunchPhase('installing')
+        setInlineNotice({
+          type: 'info',
+          message:
+            'Installation started. This can take a few minutes while Project N.O.M.A.D builds the container and prepares the SDR service.',
+        })
         const installResponse = await api.installService(serviceName)
         if (!installResponse?.success) {
           throw new Error(installResponse?.message || `Failed to install ${serviceName}`)
         }
+        setLaunchPhase('waiting')
       } else {
+        setLaunchPhase('starting')
+        setInlineNotice({
+          type: 'info',
+          message: 'Launch request sent. Project N.O.M.A.D is preparing the selected SDR service now.',
+        })
         const startResponse = await api.affectService(serviceName, 'start')
         if (!startResponse?.success) {
           throw new Error(startResponse?.message || `Failed to start ${serviceName}`)
         }
+        setLaunchPhase('waiting')
       }
 
       const deadline = Date.now() + 60000
@@ -57,8 +84,16 @@ export default function RadioPage(props: { system: { services: ServiceSlim[] } }
       }
 
       throw new Error('Service did not become ready in time.')
+    } catch (error: any) {
+      setInlineNotice({
+        type: 'error',
+        message:
+          error?.message ||
+          'Project N.O.M.A.D could not finish launching the selected SDR service.',
+      })
     } finally {
       setLoadingTarget(null)
+      setLaunchPhase(null)
     }
   }
 
@@ -90,6 +125,17 @@ export default function RadioPage(props: { system: { services: ServiceSlim[] } }
             Project N.O.M.A.D. will hand the device over automatically when you launch one.
           </Alert>
 
+          {inlineNotice && (
+            <Alert
+              title={inlineNotice.type === 'error' ? 'Launch Error' : 'Preparing Service'}
+              type={inlineNotice.type === 'error' ? 'warning' : 'info'}
+              variant="soft"
+              className="mb-6 transition-opacity duration-300"
+            >
+              {inlineNotice.message}
+            </Alert>
+          )}
+
           <div className="grid gap-6 md:grid-cols-2">
             <section className="rounded-2xl border border-desert-stone/30 bg-desert-sand-light/40 p-6">
               <div className="mb-4 flex items-center gap-3">
@@ -108,15 +154,26 @@ export default function RadioPage(props: { system: { services: ServiceSlim[] } }
                 variant="primary"
                 className="w-full"
                 loading={loadingTarget === SERVICE_NAMES.RADIO}
+                disabled={isBusy}
                 icon={loadingTarget === SERVICE_NAMES.RADIO ? undefined : 'IconPlayerPlay'}
                 onClick={() => launchService(SERVICE_NAMES.RADIO, 8400)}
               >
-                {loadingTarget === SERVICE_NAMES.RADIO ? 'Launching Radio...' : 'Open Radio / DAB+'}
+                {loadingTarget === SERVICE_NAMES.RADIO
+                  ? launchPhase === 'installing'
+                    ? 'Installing Radio...'
+                    : launchPhase === 'waiting'
+                      ? 'Waiting For Radio...'
+                      : 'Launching Radio...'
+                  : 'Open Radio / DAB+'}
               </StyledButton>
               {loadingTarget === SERVICE_NAMES.RADIO && (
                 <p className="mt-3 flex items-center gap-2 text-sm text-desert-stone-dark">
                   <IconLoader2 className="animate-spin" size={16} />
-                  Stopping the analyzer if needed, then preparing the Radio endpoint.
+                  {launchPhase === 'installing'
+                    ? 'Building and installing the Radio service. This may take a few minutes on first install.'
+                    : launchPhase === 'waiting'
+                      ? 'Radio is starting up now. Project N.O.M.A.D will redirect once it is ready.'
+                      : 'Stopping the analyzer if needed, then preparing the Radio endpoint.'}
                 </p>
               )}
             </section>
@@ -138,17 +195,26 @@ export default function RadioPage(props: { system: { services: ServiceSlim[] } }
                 variant="primary"
                 className="w-full"
                 loading={loadingTarget === SERVICE_NAMES.OPENWEBRX}
+                disabled={isBusy}
                 icon={loadingTarget === SERVICE_NAMES.OPENWEBRX ? undefined : 'IconPlayerPlay'}
                 onClick={() => launchService(SERVICE_NAMES.OPENWEBRX, 8500)}
               >
                 {loadingTarget === SERVICE_NAMES.OPENWEBRX
-                  ? 'Launching Spectrum Analyzer...'
+                  ? launchPhase === 'installing'
+                    ? 'Installing Spectrum Analyzer...'
+                    : launchPhase === 'waiting'
+                      ? 'Waiting For Spectrum Analyzer...'
+                      : 'Launching Spectrum Analyzer...'
                   : 'Open Spectrum Analyzer'}
               </StyledButton>
               {loadingTarget === SERVICE_NAMES.OPENWEBRX && (
                 <p className="mt-3 flex items-center gap-2 text-sm text-desert-stone-dark">
                   <IconLoader2 className="animate-spin" size={16} />
-                  Stopping the radio receiver if needed, then preparing OpenWebRX+.
+                  {launchPhase === 'installing'
+                    ? 'Building and installing the Spectrum Analyzer service. This may take a few minutes on first install.'
+                    : launchPhase === 'waiting'
+                      ? 'Spectrum Analyzer is starting up now. Project N.O.M.A.D will redirect once it is ready.'
+                      : 'Stopping the radio receiver if needed, then preparing OpenWebRX+.'}
                 </p>
               )}
             </section>

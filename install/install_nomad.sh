@@ -1320,6 +1320,11 @@ configure_local_storage() {
 }
 
 select_swap_device_interactively() {
+  if [[ "${enable_ai_runtime}" != 'true' ]]; then
+    use_external_swap='false'
+    return 0
+  fi
+
   local candidates=()
   local candidate_output=''
   candidate_output="$(list_external_partition_candidates)"
@@ -1344,7 +1349,7 @@ select_swap_device_interactively() {
 
   if ! show_nomad_yesno \
     "Swap Setup" \
-    "A separate USB stick can be used for supplemental swap.\n\nOn low-memory ARM inference systems this can help absorb memory pressure better than relying only on the default OS swap path on the TF/SD card.\n\nDo you want Project N.O.M.A.D. to configure supplemental USB-backed swap?" \
+    "AI Assistant support was enabled for this install.\n\nA dedicated USB stick can be used for supplemental swap.\n\nFor larger local models, inference can generate heavy memory pressure and bursty I/O. Using a separate USB swap device is usually kinder to the TF/SD card and can help the system recover more gracefully under load.\n\nDo you want Project N.O.M.A.D. to configure supplemental USB-backed swap for AI workloads?" \
     "Choose Device" \
     "Keep System Swap"; then
     use_external_swap='false'
@@ -1373,10 +1378,12 @@ select_swap_device_interactively() {
       recommended="${dev}"
       state='ON'
     fi
-    local description="${dev} | ${size:-<unknown>} | fs=${fstype:-<none>} | label=${label:-<none>} | mount=${mountpoint:-<none>}"
+    local notes_csv=''
     if [[ ${#notes[@]} -gt 0 ]]; then
-      description="${description} | $(IFS=,; echo "${notes[*]}")"
+      notes_csv="$(IFS=,; echo "${notes[*]}")"
     fi
+    local description=''
+    description="$(format_storage_choice_description "${size:-<unknown>}" "${fstype:-<none>}" "${label:-<none>}" "${mountpoint:-<none>}" "${notes_csv}")"
     options+=("${dev}" "${description}" "${state}")
   done
   if [[ "${recommended}" == 'SYSTEM' ]]; then
@@ -1399,6 +1406,12 @@ select_swap_device_interactively() {
 }
 
 configure_optional_swap_device() {
+  if [[ "${enable_ai_runtime}" != 'true' ]]; then
+    use_external_swap='false'
+    echo -e "${YELLOW}#${RESET} AI runtime was not requested, so Project N.O.M.A.D will keep the current OS swap layout."
+    return 0
+  fi
+
   if [[ "${use_external_swap}" == 'auto' ]]; then
     select_swap_device_interactively
   fi
@@ -1943,15 +1956,17 @@ run_platform_runtime_preinstall() {
 
 get_install_confirmation(){
   if [[ "${assume_yes}" == 'true' ]]; then
+    accepted_terms='true'
     echo -e "${YELLOW}#${RESET} Auto-confirm enabled: proceeding with Project N.O.M.A.D installation."
     return 0
   fi
 
   if show_nomad_yesno \
     "Project N.O.M.A.D. Installer" \
-    "This installer will prepare Docker, storage, and optional AI runtime support for Project N.O.M.A.D.\n\nYou will be asked for consent before any disk format or recovery-impacting step.\n\nContinue?" \
-    "Continue" \
+    "This installer will prepare Docker, storage, and optional AI runtime support for Project N.O.M.A.D.\n\nProject N.O.M.A.D. is licensed under the Apache License 2.0.\n\nBy continuing, you confirm that you have read and accept the license terms for this software and the bundled installer flow.\n\nYou will be asked for consent before any disk format or recovery-impacting step.\n\nContinue?" \
+    "Accept & Continue" \
     "Exit"; then
+    accepted_terms='true'
     echo -e "${GREEN}#${RESET} User chose to continue with the installation."
     return 0
   fi
@@ -1961,6 +1976,10 @@ get_install_confirmation(){
 }
 
 accept_terms() {
+  if [[ "${accepted_terms}" == 'true' ]]; then
+    return 0
+  fi
+
   if [[ "${assume_yes}" == 'true' ]]; then
     accepted_terms='true'
     echo -e "${YELLOW}#${RESET} Auto-confirm enabled: accepting License Agreement & Terms of Use."

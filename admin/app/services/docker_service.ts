@@ -859,6 +859,42 @@ export class DockerService {
       band_wrap: true,
     })
 
+    upsertProfileByName('PMR446', {
+      key: 'pmr446',
+      center_freq: 446100000,
+      samp_rate: 2048000,
+      start_freq: 446006250,
+      start_mod: 'nfm',
+      tuning_step: '6250',
+      band_min_freq: 446000000,
+      band_max_freq: 446200000,
+      band_wrap: true,
+    })
+
+    upsertProfileByName('VHF Utility / Public Service', {
+      key: 'vhf_utility_public_service',
+      center_freq: 164000000,
+      samp_rate: 2048000,
+      start_freq: 162000000,
+      start_mod: 'nfm',
+      tuning_step: '12500',
+      band_min_freq: 156000000,
+      band_max_freq: 174000000,
+      band_wrap: true,
+    })
+
+    upsertProfileByName('UHF Utility / Public Service', {
+      key: 'uhf_utility_public_service',
+      center_freq: 460000000,
+      samp_rate: 2048000,
+      start_freq: 458000000,
+      start_mod: 'nfm',
+      tuning_step: '12500',
+      band_min_freq: 450000000,
+      band_max_freq: 470000000,
+      band_wrap: true,
+    })
+
     await writeFile(settingsPath, `${JSON.stringify(settings, null, 4)}\n`, 'utf-8')
   }
 
