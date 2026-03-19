@@ -1274,10 +1274,12 @@ select_external_device_interactively() {
     if [[ -n "${transport}" ]]; then
       notes+=("${transport}")
     fi
-    local description="${dev} | ${size:-<unknown>} | fs=${fstype:-<none>} | label=${label:-<none>} | mount=${mountpoint:-<none>}"
+    local notes_csv=''
     if [[ ${#notes[@]} -gt 0 ]]; then
-      description="${description} | $(IFS=,; echo "${notes[*]}")"
+      notes_csv="$(IFS=,; echo "${notes[*]}")"
     fi
+    local description=''
+    description="$(format_storage_choice_description "${size:-<unknown>}" "${fstype:-<none>}" "${label:-<none>}" "${mountpoint:-<none>}" "${notes_csv}")"
     local state='OFF'
     if [[ -z "${recommended_selection}" && "${recommendation}" == 'true' && ! " ${notes[*]} " =~ " active-swap " ]]; then
       recommended_selection="${dev}"
@@ -1578,6 +1580,45 @@ human_readable_kib() {
     }
     printf "%.1f %s", value, units[unit]
   }'
+}
+
+crop_dialog_text() {
+  local text="$1"
+  local max_len="${2:-68}"
+
+  if (( ${#text} <= max_len )); then
+    printf '%s' "${text}"
+    return 0
+  fi
+
+  if (( max_len <= 3 )); then
+    printf '%.*s' "${max_len}" "${text}"
+    return 0
+  fi
+
+  printf '%s...' "${text:0:max_len-3}"
+}
+
+format_storage_choice_description() {
+  local size="$1"
+  local fstype="$2"
+  local label="$3"
+  local mountpoint="$4"
+  local notes_csv="$5"
+
+  local short_label="${label:-none}"
+  local short_mount="${mountpoint:-none}"
+  local short_fs="${fstype:-none}"
+
+  short_label="$(crop_dialog_text "${short_label}" 14)"
+  short_mount="$(crop_dialog_text "${short_mount}" 16)"
+
+  local desc="${size:-?} fs=${short_fs} lbl=${short_label} mnt=${short_mount}"
+  if [[ -n "${notes_csv}" ]]; then
+    desc="${desc} ${notes_csv}"
+  fi
+
+  crop_dialog_text "${desc}" 72
 }
 
 print_runtime_preflight_report() {
@@ -2117,6 +2158,35 @@ start_management_containers() {
   echo -e "${GREEN}#${RESET} Management containers started successfully.\\n"
 }
 
+wait_for_management_interface_ready() {
+  local health_url='http://127.0.0.1:8080/api/health'
+  local max_attempts=120
+  local sleep_seconds=5
+  local attempt=1
+  local response=''
+
+  echo -e "${YELLOW}#${RESET} Waiting for the Project N.O.M.A.D management interface to finish booting...\\n"
+
+  while (( attempt <= max_attempts )); do
+    response="$(curl -fsS "${health_url}" 2>/dev/null || true)"
+    if [[ "${response}" == *'"status":"ok"'* ]]; then
+      echo -e "${GREEN}#${RESET} Management interface is healthy and ready at ${WHITE_R}${health_url}${RESET}.\\n"
+      return 0
+    fi
+
+    if (( attempt % 6 == 1 )); then
+      echo -e "${YELLOW}#${RESET} Still waiting for the web interface to become ready (${attempt}/${max_attempts})..."
+    fi
+
+    sleep "${sleep_seconds}"
+    attempt=$((attempt + 1))
+  done
+
+  echo -e "${RED}#${RESET} The management interface did not become healthy in time."
+  echo -e "${RED}#${RESET} Check ${WHITE_R}sudo docker logs nomad_admin${RESET} and the installer log at ${WHITE_R}${INSTALL_LOG_FILE}${RESET}."
+  exit 1
+}
+
 get_local_ip() {
   local_ip_address=$(hostname -I | awk '{print $1}')
   if [[ -z "$local_ip_address" ]]; then
@@ -2348,6 +2418,7 @@ download_sidecar_files
 download_helper_scripts
 download_management_compose_file
 start_management_containers
+wait_for_management_interface_ready
 verify_gpu_setup
 success_message
 
