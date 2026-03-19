@@ -215,7 +215,11 @@ ensure_dependencies_installed() {
 }
 
 installer_tui_available() {
-  [[ "${assume_yes}" != 'true' ]] && [[ -t 0 && -t 1 ]] && command -v whiptail >/dev/null 2>&1
+  [[ "${assume_yes}" != 'true' ]] \
+    && [[ -t 0 && -t 1 ]] \
+    && [[ -n "${TERM:-}" ]] \
+    && [[ "${TERM:-dumb}" != 'dumb' ]] \
+    && command -v whiptail >/dev/null 2>&1
 }
 
 nomad_backtitle() {
@@ -235,7 +239,7 @@ show_nomad_msgbox() {
   header
   echo -e "${GREEN}${title}${RESET}"
   echo
-  echo -e "${message}"
+  printf "%b\n" "${message}"
   echo
 }
 
@@ -255,8 +259,39 @@ show_nomad_yesno() {
     return $?
   fi
 
-  read -r -p "${message} (${yes_label}/${no_label}): " choice
-  [[ "${choice}" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]
+  echo
+  header
+  echo -e "${GREEN}${title}${RESET}"
+  echo
+  printf "%b\n\n" "${message}"
+  echo "  1) ${yes_label}"
+  echo "  2) ${no_label}"
+  echo
+  local choice=''
+  read -r -p "Choose [1/2]: " choice
+  case "${choice}" in
+    1|'')
+      return 0
+      ;;
+    2)
+      return 1
+      ;;
+    y|Y|yes|YES)
+      return 0
+      ;;
+    n|N|no|NO)
+      return 1
+      ;;
+    [Cc][Oo][Nn][Tt][Ii][Nn][Uu][Ee])
+      return 0
+      ;;
+    [Ee][Xx][Ii][Tt]|[Cc][Aa][Nn][Cc][Ee][Ll]|[Dd][Ee][Cc][Ll][Ii][Nn][Ee])
+      return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 show_nomad_radiolist() {
@@ -272,6 +307,11 @@ show_nomad_radiolist() {
     return $?
   fi
 
+  echo
+  header
+  echo -e "${GREEN}${title}${RESET}"
+  echo
+  printf "%b\n\n" "${message}"
   local tags=()
   local index=1
   while [[ $# -gt 0 ]]; do
