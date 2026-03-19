@@ -1600,6 +1600,7 @@ print_runtime_preflight_report() {
   echo "Root free space: ${root_available_hr}"
   echo "Docker service: ${docker_service_state:-unknown}"
   echo "Docker compose: ${docker_compose_version}"
+  echo "AI runtime requested: ${enable_ai_runtime}"
 
   if command -v nvidia-smi >/dev/null 2>&1; then
     echo "GPU host check: $(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null | paste -sd '; ' -)"
@@ -1672,7 +1673,7 @@ run_runtime_preflight_checks() {
     fi
   fi
 
-  if [[ "${target_platform}" == 'raspberry-pi' ]] && has_nvidia_pci_device; then
+  if [[ "${target_platform}" == 'raspberry-pi' ]] && has_nvidia_pci_device && [[ "${enable_ai_runtime}" == 'true' ]]; then
     if ! command -v nvidia-smi >/dev/null 2>&1; then
       record_preflight_failure "NVIDIA GPU hardware is present, but nvidia-smi is unavailable. The Pi host driver stack did not install correctly."
     elif ! nvidia-smi >/dev/null 2>&1; then
@@ -1698,6 +1699,8 @@ run_runtime_preflight_checks() {
     else
       echo -e "${GREEN}#${RESET} Container GPU smoke test passed: ${WHITE_R}${gpu_smoke_output}${RESET}"
     fi
+  elif [[ "${target_platform}" == 'raspberry-pi' ]] && has_nvidia_pci_device && [[ "${enable_ai_runtime}" == 'false' ]]; then
+    echo -e "${YELLOW}#${RESET} AI runtime was skipped by user choice; NVIDIA/CUDA host validation is being skipped."
   fi
 
   if [[ "${skip_storage_preflight}" != 'true' ]]; then
@@ -1813,6 +1816,11 @@ configure_nvidia_container_runtime() {
 setup_nvidia_container_toolkit() {
   # This function attempts to set up NVIDIA GPU support but is non-blocking
   # Any failures will result in warnings but will NOT stop the installation process
+
+  if [[ "${enable_ai_runtime}" == 'false' ]]; then
+    echo -e "${YELLOW}#${RESET} Skipping NVIDIA container toolkit setup because AI runtime was not requested.\\n"
+    return 0
+  fi
   
   echo -e "${YELLOW}#${RESET} Checking for NVIDIA GPU...\\n"
   
