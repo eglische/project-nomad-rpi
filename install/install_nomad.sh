@@ -1985,9 +1985,27 @@ download_management_compose_file() {
   sed -i "s|/opt/project-nomad/mysql|${nomad_data_root}/mysql|g" "$compose_file_path"
   sed -i "s|/opt/project-nomad/redis|${nomad_data_root}/redis|g" "$compose_file_path"
   sed -i "s|__NOMAD_SOURCE_DIR__|${source_repo_dir}|g" "$compose_file_path"
+  sed -i "s|\\./entrypoint\\.sh:/usr/local/bin/entrypoint\\.sh|${NOMAD_DIR}/entrypoint.sh:/usr/local/bin/entrypoint.sh|g" "$compose_file_path"
+  sed -i "s|\\./wait-for-it\\.sh:/usr/local/bin/wait-for-it\\.sh|${NOMAD_DIR}/wait-for-it.sh:/usr/local/bin/wait-for-it.sh|g" "$compose_file_path"
+  sed -i 's|test: \["CMD", "mysqladmin", "ping", "-h", "localhost"\]|test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p\\"$$MYSQL_ROOT_PASSWORD\\""]|g' "$compose_file_path"
 
   if grep -q 'replaceme' "$compose_file_path"; then
     echo -e "${RED}#${RESET} Compose templating left unresolved placeholder values in ${WHITE_R}${compose_file_path}${RESET}."
+    exit 1
+  fi
+
+  if ! grep -q "${NOMAD_DIR}/entrypoint.sh:/usr/local/bin/entrypoint.sh" "$compose_file_path"; then
+    echo -e "${RED}#${RESET} Management compose file was not wired to the installed entrypoint script under ${WHITE_R}${NOMAD_DIR}${RESET}."
+    exit 1
+  fi
+
+  if ! grep -q "${NOMAD_DIR}/wait-for-it.sh:/usr/local/bin/wait-for-it.sh" "$compose_file_path"; then
+    echo -e "${RED}#${RESET} Management compose file was not wired to the installed wait-for-it script under ${WHITE_R}${NOMAD_DIR}${RESET}."
+    exit 1
+  fi
+
+  if ! grep -q 'mysqladmin ping -h localhost -uroot -p\\"$$MYSQL_ROOT_PASSWORD\\"' "$compose_file_path"; then
+    echo -e "${RED}#${RESET} Management compose file MySQL healthcheck was not templated correctly."
     exit 1
   fi
   

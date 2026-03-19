@@ -14,8 +14,8 @@ services:
     volumes:
       - /opt/project-nomad/storage:/app/storage
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./entrypoint.sh:/usr/local/bin/entrypoint.sh
-      - ./wait-for-it.sh:/usr/local/bin/wait-for-it.sh
+      - /opt/project-nomad/entrypoint.sh:/usr/local/bin/entrypoint.sh
+      - /opt/project-nomad/wait-for-it.sh:/usr/local/bin/wait-for-it.sh
       - nomad-update-shared:/app/update-shared
     environment:
       - NODE_ENV=production
@@ -70,7 +70,7 @@ services:
     volumes:
       - /opt/project-nomad/mysql:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p\"$$MYSQL_ROOT_PASSWORD\""]
       interval: 30s
       timeout: 10s
       retries: 3
