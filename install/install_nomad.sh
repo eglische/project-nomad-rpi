@@ -113,6 +113,16 @@ header_red() {
 }
 
 setup_logging() {
+  if [[ -t 0 ]]; then
+    exec 3<&0
+  fi
+  if [[ -t 1 ]]; then
+    exec 4>&1
+  fi
+  if [[ -t 2 ]]; then
+    exec 5>&2
+  fi
+
   mkdir -p "${INSTALL_LOG_DIR}"
   touch "${INSTALL_LOG_FILE}"
   exec > >(tee -a "${INSTALL_LOG_FILE}") 2>&1
@@ -216,7 +226,7 @@ ensure_dependencies_installed() {
 
 installer_tui_available() {
   [[ "${assume_yes}" != 'true' ]] \
-    && [[ -t 0 && -t 1 ]] \
+    && [[ -t 3 && -t 4 ]] \
     && [[ -n "${TERM:-}" ]] \
     && [[ "${TERM:-dumb}" != 'dumb' ]] \
     && command -v whiptail >/dev/null 2>&1
@@ -231,7 +241,7 @@ show_nomad_msgbox() {
   local message="$2"
 
   if installer_tui_available; then
-    whiptail --backtitle "$(nomad_backtitle)" --title "${title}" --msgbox "${message}" 18 78
+    whiptail --backtitle "$(nomad_backtitle)" --title "${title}" --msgbox "${message}" 18 78 <&3 >&4 2>&5
     return $?
   fi
 
@@ -255,7 +265,7 @@ show_nomad_yesno() {
       --title "${title}" \
       --yes-button "${yes_label}" \
       --no-button "${no_label}" \
-      --yesno "${message}" 18 78
+      --yesno "${message}" 18 78 <&3 >&4 2>&5
     return $?
   fi
 
@@ -303,7 +313,7 @@ show_nomad_radiolist() {
     whiptail \
       --backtitle "$(nomad_backtitle)" \
       --title "${title}" \
-      --radiolist "${message}" 22 100 12 "$@" 3>&1 1>&2 2>&3
+      --radiolist "${message}" 22 100 12 "$@" 3>&1 1>&4 2>&5 <&3
     return $?
   fi
 
