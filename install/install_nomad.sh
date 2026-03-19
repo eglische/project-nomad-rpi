@@ -314,7 +314,7 @@ show_nomad_radiolist() {
     whiptail \
       --backtitle "$(nomad_backtitle)" \
       --title "${title}" \
-      --radiolist "${message}" 22 100 12 "$@" 3>&1 1>&4 2>&5 <&3
+      --radiolist "${message}" 22 100 12 "$@" 6>&1 1>&4 2>&5 <&3
     return $?
   fi
 
