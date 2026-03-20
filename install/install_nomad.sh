@@ -852,6 +852,13 @@ list_external_partition_candidates() {
   lsblk -rno PATH,TYPE,FSTYPE,LABEL,MOUNTPOINT,SIZE,RM,TRAN | awk '$2 == "part" { printf "%s|%s|%s|%s|%s|%s|%s\n", $1, $3, $4, $5, $6, $7, $8 }'
 }
 
+list_swap_device_candidates() {
+  lsblk -rno PATH,TYPE,FSTYPE,LABEL,MOUNTPOINT,SIZE,RM,TRAN | awk '
+    $2 == "part" || ($2 == "disk" && ($7 == "usb" || $6 == "1")) {
+      printf "%s|%s|%s|%s|%s|%s|%s|%s\n", $1, $2, $3, $4, $5, $6, $7, $8
+    }'
+}
+
 device_contains_zim_files() {
   local device_path="$1"
   local fstype=''
@@ -1327,7 +1334,7 @@ select_swap_device_interactively() {
 
   local candidates=()
   local candidate_output=''
-  candidate_output="$(list_external_partition_candidates)"
+  candidate_output="$(list_swap_device_candidates)"
 
   while IFS= read -r line; do
     [[ -z "${line}" ]] && continue
@@ -1362,10 +1369,13 @@ select_swap_device_interactively() {
   local recommended='SYSTEM'
   local entry=''
   for entry in "${candidates[@]}"; do
-    IFS='|' read -r dev fstype label mountpoint size rm_flag transport <<< "${entry}"
+    IFS='|' read -r dev device_type fstype label mountpoint size rm_flag transport <<< "${entry}"
     local notes=()
     if device_hosts_active_swap "${dev}"; then
       notes+=("active-swap")
+    fi
+    if [[ "${device_type}" == 'disk' ]]; then
+      notes+=("whole-disk")
     fi
     if [[ "${rm_flag}" == '1' ]]; then
       notes+=("removable")
