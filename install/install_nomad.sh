@@ -55,7 +55,8 @@ NVIDIA_CUDA_RUNFILE_URL="${NVIDIA_CUDA_RUNFILE_URL:-https://developer.download.n
 NVIDIA_OPEN_MODULES_REPO_URL="${NVIDIA_OPEN_MODULES_REPO_URL:-https://github.com/mariobalanica/open-gpu-kernel-modules.git}"
 NVIDIA_OPEN_MODULES_BRANCH="${NVIDIA_OPEN_MODULES_BRANCH:-non-coherent-arm-fixes}"
 NVIDIA_OPEN_MODULES_COMMIT="${NVIDIA_OPEN_MODULES_COMMIT:-10072734b2f88f3580cdb036778ec27d2b4f2fb9}"
-NVIDIA_RUNTIME_CACHE_DIR="${NVIDIA_RUNTIME_CACHE_DIR:-/var/cache/project-nomad/nvidia}"
+DEFAULT_NVIDIA_RUNTIME_CACHE_DIR="${NVIDIA_RUNTIME_CACHE_DIR:-/var/cache/project-nomad/nvidia}"
+NVIDIA_RUNTIME_CACHE_DIR="${DEFAULT_NVIDIA_RUNTIME_CACHE_DIR}"
 NVIDIA_STATE_DIR="${NVIDIA_STATE_DIR:-/var/lib/project-nomad-runtime}"
 NVIDIA_APT_PIN_FILE="${NVIDIA_APT_PIN_FILE:-/etc/apt/preferences.d/nvidia-block}"
 CUDA_ENV_FILE="${CUDA_ENV_FILE:-/etc/profile.d/cuda.sh}"
@@ -443,6 +444,26 @@ export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/cuda-13.0/lib64"
 EOF
 }
 
+cuda_nvcc_path() {
+  if command -v nvcc >/dev/null 2>&1; then
+    command -v nvcc
+    return 0
+  fi
+
+  if [[ -x "/usr/local/cuda-13.0/bin/nvcc" ]]; then
+    echo "/usr/local/cuda-13.0/bin/nvcc"
+    return 0
+  fi
+
+  return 1
+}
+
+cuda_toolkit_looks_ready() {
+  local nvcc_path=''
+  nvcc_path="$(cuda_nvcc_path)" || return 1
+  "${nvcc_path}" --version 2>/dev/null | grep -q "release 13.0"
+}
+
 download_with_resume() {
   local url="$1"
   local destination_path="$2"
@@ -543,7 +564,7 @@ install_raspberry_pi_cuda_toolkit() {
     return 0
   fi
 
-  if command -v nvcc >/dev/null 2>&1 && nvcc --version 2>/dev/null | grep -q "release 13.0"; then
+  if cuda_toolkit_looks_ready; then
     echo -e "${GREEN}#${RESET} CUDA toolkit ${WHITE_R}${NVIDIA_CUDA_VERSION}${RESET} is already installed.\\n"
     ensure_cuda_environment_file
     return 0
@@ -565,12 +586,12 @@ install_raspberry_pi_cuda_toolkit() {
 
   ensure_cuda_environment_file
 
-  if ! command -v nvcc >/dev/null 2>&1; then
+  if ! cuda_nvcc_path >/dev/null 2>&1; then
     export PATH="${PATH}:/usr/local/cuda-13.0/bin"
     export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/cuda-13.0/lib64"
   fi
 
-  if ! command -v nvcc >/dev/null 2>&1 || ! nvcc --version 2>/dev/null | grep -q "release 13.0"; then
+  if ! cuda_toolkit_looks_ready; then
     echo -e "${RED}#${RESET} CUDA toolkit install did not expose a usable ${WHITE_R}nvcc${RESET}."
     exit 1
   fi
@@ -618,8 +639,7 @@ ensure_raspberry_pi_4k_kernel_prerequisites() {
 nvidia_cuda_stack_looks_ready() {
   command -v nvidia-smi >/dev/null 2>&1 \
     && nvidia-smi >/dev/null 2>&1 \
-    && command -v nvcc >/dev/null 2>&1 \
-    && nvcc --version 2>/dev/null | grep -q "release 13.0"
+    && cuda_toolkit_looks_ready
 }
 
 nvidia_cuda_host_stack_passes_quick_test() {
@@ -652,24 +672,64 @@ nvidia_cuda_stack_passes_quick_test() {
     nvidia-smi --query-gpu=name,driver_version --format=csv,noheader >/dev/null 2>&1
 }
 
+prompt_ai_runtime_selection() {
+  if [[ "${target_platform}" != 'raspberry-pi' ]]; then
+    return 0
+  fi
+
+  if [[ "${enable_ai_runtime}" != 'auto' ]]; then
+    if [[ "${enable_ai_runtime}" == 'true' ]]; then
+      ai_runtime_requested='true'
+    elif [[ "${enable_ai_runtime}" == 'false' ]]; then
+      ai_runtime_requested='false'
+    fi
+    return 0
+  fi
+
+  if show_nomad_yesno \
+    "AI Assistant Setup" \
+    "Project N.O.M.A.D. can install the AI Assistant on this Raspberry Pi.\n\nOn a Pi without GPU acceleration, inference is limited to smaller Pi-appropriate models and will be slower than an eGPU-backed setup.\n\nContinue with AI Assistant installation?" \
+    "Install AI Assistant" \
+    "Skip AI Assistant"; then
+    ai_runtime_requested='true'
+  else
+    enable_ai_runtime='false'
+    ai_runtime_requested='false'
+    return 0
+  fi
+
+  if ! has_nvidia_pci_device; then
+    if show_nomad_yesno \
+      "CPU-only AI Assistant" \
+      "No NVIDIA GPU was detected on this Raspberry Pi.\n\nProject N.O.M.A.D. can still install the AI Assistant in CPU-only mode, but you will be limited to smaller Pi-specific models and slower local inference.\n\nInstall the AI Assistant anyway?" \
+      "Install CPU-only AI" \
+      "Cancel AI Assistant"; then
+      enable_ai_runtime='false'
+      return 0
+    fi
+
+    enable_ai_runtime='false'
+    ai_runtime_requested='false'
+    return 0
+  fi
+
+  if show_nomad_yesno \
+    "GPU Acceleration Setup" \
+    "An NVIDIA GPU was detected on this Raspberry Pi.\n\nProject N.O.M.A.D. can install the optional CUDA/NVIDIA toolstack for GPU-accelerated Ollama inference.\n\nChoose GPU acceleration if you want faster local inference. You can skip it and still keep the AI Assistant in CPU-only mode." \
+    "Enable GPU Acceleration" \
+    "Use CPU-only AI"; then
+    enable_ai_runtime='true'
+  else
+    enable_ai_runtime='false'
+  fi
+}
+
 ensure_raspberry_pi_nvidia_prerequisites() {
   if [[ "${target_platform}" != 'raspberry-pi' ]]; then
     return 0
   fi
 
-  if [[ "${enable_ai_runtime}" == 'auto' ]] && has_nvidia_pci_device; then
-    if show_nomad_yesno \
-      "AI Runtime Setup" \
-      "An NVIDIA GPU was detected on this Raspberry Pi.\n\nProject N.O.M.A.D. can install the optional CUDA/NVIDIA toolstack for GPU-accelerated Ollama inference.\n\nSkip this if you do not plan to use the AI Assistant or GPU-backed inference on this machine." \
-      "Install AI Runtime" \
-      "Skip AI Runtime"; then
-      enable_ai_runtime='true'
-      ai_runtime_requested='true'
-    else
-      enable_ai_runtime='false'
-      ai_runtime_requested='false'
-    fi
-  fi
+  prompt_ai_runtime_selection
 
   if [[ "${enable_ai_runtime}" == 'false' ]]; then
     echo -e "${YELLOW}#${RESET} Skipping optional NVIDIA/CUDA runtime setup for this install.\\n"
@@ -889,14 +949,63 @@ device_filesystem_type() {
 }
 
 list_external_partition_candidates() {
-  lsblk -rno PATH,TYPE,FSTYPE,LABEL,MOUNTPOINT,SIZE,RM,TRAN | awk '$2 == "part" { printf "%s|%s|%s|%s|%s|%s|%s\n", $1, $3, $4, $5, $6, $7, $8 }'
+  python3 - <<'PY'
+import json
+import subprocess
+
+result = subprocess.run(
+    ['lsblk', '-J', '-o', 'PATH,TYPE,FSTYPE,LABEL,MOUNTPOINT,SIZE,RM,TRAN'],
+    check=True,
+    capture_output=True,
+    text=True,
+)
+data = json.loads(result.stdout)
+
+def walk(nodes):
+    for node in nodes:
+        yield node
+        for child in walk(node.get('children', []) or []):
+            yield child
+
+for node in walk(data.get('blockdevices', [])):
+    if node.get('type') != 'part':
+        continue
+    print(
+        f"{node.get('path','')}|{node.get('fstype') or ''}|{node.get('label') or ''}|"
+        f"{node.get('mountpoint') or ''}|{node.get('size') or ''}|{int(bool(node.get('rm')))}|{node.get('tran') or ''}"
+    )
+PY
 }
 
 list_swap_device_candidates() {
-  lsblk -rno PATH,TYPE,FSTYPE,LABEL,MOUNTPOINT,SIZE,RM,TRAN | awk '
-    $2 == "part" || ($2 == "disk" && ($7 == "usb" || $6 == "1")) {
-      printf "%s|%s|%s|%s|%s|%s|%s|%s\n", $1, $2, $3, $4, $5, $6, $7, $8
-    }'
+  python3 - <<'PY'
+import json
+import subprocess
+
+result = subprocess.run(
+    ['lsblk', '-J', '-o', 'PATH,TYPE,FSTYPE,LABEL,MOUNTPOINT,SIZE,RM,TRAN'],
+    check=True,
+    capture_output=True,
+    text=True,
+)
+data = json.loads(result.stdout)
+
+def walk(nodes):
+    for node in nodes:
+        yield node
+        for child in walk(node.get('children', []) or []):
+            yield child
+
+for node in walk(data.get('blockdevices', [])):
+    node_type = node.get('type')
+    removable = int(bool(node.get('rm')))
+    transport = node.get('tran') or ''
+    if node_type == 'part' or (node_type == 'disk' and (transport == 'usb' or removable == 1)):
+        print(
+            f"{node.get('path','')}|{node_type or ''}|{node.get('fstype') or ''}|{node.get('label') or ''}|"
+            f"{node.get('mountpoint') or ''}|{node.get('size') or ''}|{removable}|{transport}"
+        )
+PY
 }
 
 device_contains_zim_files() {
@@ -1074,8 +1183,10 @@ ensure_safe_boot_order() {
 refresh_nomad_data_root() {
   if [[ "${use_external_storage}" == 'false' ]]; then
     nomad_data_root="${NOMAD_DIR}"
+    NVIDIA_RUNTIME_CACHE_DIR="${DEFAULT_NVIDIA_RUNTIME_CACHE_DIR}"
   else
     nomad_data_root="${external_mount}/project-nomad"
+    NVIDIA_RUNTIME_CACHE_DIR="${nomad_data_root}/runtime-cache/nvidia"
   fi
   install_secrets_file="${nomad_data_root}/install-secrets.env"
   swap_file_path="${swap_mount}/swapfile"
@@ -1449,7 +1560,7 @@ select_swap_device_interactively() {
       notes+=("${transport}")
     fi
     local state='OFF'
-    if [[ "${recommended}" == 'SYSTEM' && "${rm_flag}" == '1' && "${fstype}" != '' ]]; then
+    if [[ "${recommended}" == 'SYSTEM' && "${rm_flag}" == '1' ]]; then
       recommended="${dev}"
       state='ON'
     fi
@@ -1807,7 +1918,7 @@ run_runtime_preflight_checks() {
       record_preflight_failure "NVIDIA GPU hardware is present, but nvidia-smi cannot talk to the driver. Reboot after the host driver/module install and rerun the installer."
     fi
 
-    if ! command -v nvcc >/dev/null 2>&1; then
+    if ! cuda_nvcc_path >/dev/null 2>&1; then
       record_preflight_failure "NVIDIA GPU hardware is present, but the CUDA toolkit is missing. The Pi host CUDA install did not complete."
     fi
 
@@ -2120,7 +2231,22 @@ download_management_compose_file() {
   sed -i "s|__NOMAD_SOURCE_DIR__|${source_repo_dir}|g" "$compose_file_path"
   sed -i "s|\\./entrypoint\\.sh:/usr/local/bin/entrypoint\\.sh|${NOMAD_DIR}/entrypoint.sh:/usr/local/bin/entrypoint.sh|g" "$compose_file_path"
   sed -i "s|\\./wait-for-it\\.sh:/usr/local/bin/wait-for-it\\.sh|${NOMAD_DIR}/wait-for-it.sh:/usr/local/bin/wait-for-it.sh|g" "$compose_file_path"
-  sed -i 's|test: \["CMD", "mysqladmin", "ping", "-h", "localhost"\]|test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p\\"$$MYSQL_ROOT_PASSWORD\\""]|g' "$compose_file_path"
+  sed -i 's|test: \["CMD", "mysqladmin", "ping", "-h", "localhost"\]|test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 --protocol=tcp -uroot -p\\"$$MYSQL_ROOT_PASSWORD\\""]|g' "$compose_file_path"
+  if grep -q 'mysqladmin ping -h 127.0.0.1 --protocol=tcp -uroot -p\\"$$MYSQL_ROOT_PASSWORD\\"' "$compose_file_path"; then
+    python3 - "$compose_file_path" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+if 'start_period: 180s' not in text:
+    text = text.replace(
+        '      interval: 30s\n      timeout: 10s\n      retries: 3\n',
+        '      start_period: 180s\n      interval: 30s\n      timeout: 10s\n      retries: 10\n',
+    )
+path.write_text(text)
+PY
+  fi
 
   if grep -q 'replaceme' "$compose_file_path"; then
     echo -e "${RED}#${RESET} Compose templating left unresolved placeholder values in ${WHITE_R}${compose_file_path}${RESET}."
@@ -2137,8 +2263,13 @@ download_management_compose_file() {
     exit 1
   fi
 
-  if ! grep -q 'mysqladmin ping -h localhost -uroot -p\\"$$MYSQL_ROOT_PASSWORD\\"' "$compose_file_path"; then
+  if ! grep -q 'mysqladmin ping -h 127.0.0.1 --protocol=tcp -uroot -p\\"$$MYSQL_ROOT_PASSWORD\\"' "$compose_file_path"; then
     echo -e "${RED}#${RESET} Management compose file MySQL healthcheck was not templated correctly."
+    exit 1
+  fi
+
+  if ! grep -q 'start_period: 180s' "$compose_file_path"; then
+    echo -e "${RED}#${RESET} Management compose file MySQL healthcheck start period was not templated correctly."
     exit 1
   fi
   
@@ -2243,7 +2374,29 @@ download_helper_scripts() {
 
 start_management_containers() {
   echo -e "${YELLOW}#${RESET} Starting management containers using docker compose...\\n"
-  if ! sudo docker compose -p project-nomad -f "${NOMAD_DIR}/compose.yml" up -d --build; then
+  if source_install_enabled; then
+    echo -e "${YELLOW}#${RESET} Building local Nomad images explicitly before compose startup...\\n"
+
+    if ! sudo docker build --provenance=false --sbom=false -t project-nomad-local:latest -f "${source_repo_dir}/Dockerfile" "${source_repo_dir}"; then
+      echo -e "${RED}#${RESET} Failed to build the local Nomad admin image."
+      exit 1
+    fi
+
+    if ! sudo docker build --provenance=false --sbom=false -t project-nomad-updater:latest -f "${NOMAD_DIR}/sidecar-updater/Dockerfile" "${NOMAD_DIR}/sidecar-updater"; then
+      echo -e "${RED}#${RESET} Failed to build the local updater image."
+      exit 1
+    fi
+
+    if ! sudo docker build --provenance=false --sbom=false -t project-nomad-disk-collector-local:latest -f "${source_repo_dir}/install/sidecar-disk-collector/Dockerfile" "${source_repo_dir}/install/sidecar-disk-collector"; then
+      echo -e "${RED}#${RESET} Failed to build the local disk collector image."
+      exit 1
+    fi
+
+    if ! sudo docker compose -p project-nomad -f "${NOMAD_DIR}/compose.yml" up -d --no-build; then
+      echo -e "${RED}#${RESET} Failed to start management containers. Please check the logs and try again."
+      exit 1
+    fi
+  elif ! sudo docker compose -p project-nomad -f "${NOMAD_DIR}/compose.yml" up -d; then
     echo -e "${RED}#${RESET} Failed to start management containers. Please check the logs and try again."
     exit 1
   fi
@@ -2487,6 +2640,7 @@ fi
 
 if [[ "${storage_only}" == 'true' ]]; then
   detect_target_platform
+  prompt_ai_runtime_selection
   configure_external_storage
   configure_optional_swap_device
   run_runtime_preflight_checks
@@ -2496,9 +2650,11 @@ fi
 # Main install
 get_install_confirmation
 accept_terms
-run_platform_runtime_preinstall
+detect_target_platform
+prompt_ai_runtime_selection
 configure_external_storage
 configure_optional_swap_device
+run_platform_runtime_preinstall
 run_runtime_preflight_checks
 get_local_ip
 create_nomad_directory

@@ -70,10 +70,11 @@ services:
     volumes:
       - /opt/project-nomad/mysql:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p\"$$MYSQL_ROOT_PASSWORD\""]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 --protocol=tcp -uroot -p\"$$MYSQL_ROOT_PASSWORD\""]
+      start_period: 180s
       interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 10
   redis:
     image: redis:7-alpine
     container_name: nomad_redis
@@ -91,6 +92,7 @@ services:
     build:
       context: ./sidecar-updater
       dockerfile: Dockerfile
+    image: project-nomad-updater:latest
     container_name: nomad_updater
     restart: unless-stopped
     volumes:
