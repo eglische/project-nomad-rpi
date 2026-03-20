@@ -622,13 +622,34 @@ nvidia_cuda_stack_looks_ready() {
     && nvcc --version 2>/dev/null | grep -q "release 13.0"
 }
 
-nvidia_cuda_stack_passes_quick_test() {
+nvidia_cuda_host_stack_passes_quick_test() {
   nvidia_cuda_stack_looks_ready \
-    && command -v nvidia-ctk >/dev/null 2>&1 \
-    && docker_runtime_is_configured \
-    && sudo docker run --rm --runtime=nvidia --gpus all \
-      nvidia/cuda:12.4.1-base-ubuntu22.04 \
-      nvidia-smi --query-gpu=name,driver_version --format=csv,noheader >/dev/null 2>&1
+    && command -v nvidia-ctk >/dev/null 2>&1
+}
+
+nvidia_cuda_stack_passes_quick_test() {
+  if ! nvidia_cuda_host_stack_passes_quick_test; then
+    return 1
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    echo -e "${YELLOW}#${RESET} Docker is not installed yet. Deferring the container GPU smoke test until after Docker setup."
+    return 0
+  fi
+
+  if ! systemctl is-active --quiet docker; then
+    echo -e "${YELLOW}#${RESET} Docker is not active yet. Deferring the container GPU smoke test until after Docker setup."
+    return 0
+  fi
+
+  if ! docker_runtime_is_configured; then
+    echo -e "${YELLOW}#${RESET} Docker is present but the NVIDIA runtime is not configured yet. Deferring the container GPU smoke test until after runtime setup."
+    return 0
+  fi
+
+  sudo docker run --rm --runtime=nvidia --gpus all \
+    nvidia/cuda:12.4.1-base-ubuntu22.04 \
+    nvidia-smi --query-gpu=name,driver_version --format=csv,noheader >/dev/null 2>&1
 }
 
 ensure_raspberry_pi_nvidia_prerequisites() {
