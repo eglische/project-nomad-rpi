@@ -622,6 +622,15 @@ nvidia_cuda_stack_looks_ready() {
     && nvcc --version 2>/dev/null | grep -q "release 13.0"
 }
 
+nvidia_cuda_stack_passes_quick_test() {
+  nvidia_cuda_stack_looks_ready \
+    && command -v nvidia-ctk >/dev/null 2>&1 \
+    && docker_runtime_is_configured \
+    && sudo docker run --rm --runtime=nvidia --gpus all \
+      nvidia/cuda:12.4.1-base-ubuntu22.04 \
+      nvidia-smi --query-gpu=name,driver_version --format=csv,noheader >/dev/null 2>&1
+}
+
 ensure_raspberry_pi_nvidia_prerequisites() {
   if [[ "${target_platform}" != 'raspberry-pi' ]]; then
     return 0
@@ -647,13 +656,20 @@ ensure_raspberry_pi_nvidia_prerequisites() {
   fi
 
   if has_nvidia_pci_device && nvidia_cuda_stack_looks_ready; then
-    if show_nomad_yesno \
-      "AI Runtime Already Present" \
-      "A working NVIDIA/CUDA host toolstack already appears to be installed on this Pi.\n\nThe installer can reuse the current setup, or force a reinstall of the NVIDIA/CUDA runtime components." \
-      "Reuse Existing" \
-      "Force Reinstall"; then
-      echo -e "${GREEN}#${RESET} Reusing the existing NVIDIA/CUDA host runtime."
-      return 0
+    echo -e "${YELLOW}#${RESET} NVIDIA/CUDA toolkit files were detected. Running a quick sanity check before deciding whether a reinstall is needed...\\n"
+
+    if nvidia_cuda_stack_passes_quick_test; then
+      if show_nomad_yesno \
+        "AI Runtime Already Working" \
+        "A quick sanity check confirmed that the existing NVIDIA/CUDA runtime is working on this Pi.\n\nReusing it will save time. Only choose reinstall if you specifically want to refresh the host GPU stack." \
+        "Reuse Existing" \
+        "Force Reinstall"; then
+        echo -e "${GREEN}#${RESET} Reusing the existing NVIDIA/CUDA host runtime."
+        return 0
+      fi
+    else
+      echo -e "${YELLOW}#${RESET} NVIDIA/CUDA components were found, but the quick sanity check did not pass."
+      echo -e "${YELLOW}#${RESET} Project N.O.M.A.D will continue with a reinstall of the AI runtime stack.\\n"
     fi
   fi
 
@@ -1089,6 +1105,30 @@ backup_and_reset_redis_data_if_requested() {
   sudo chown -R "$(whoami):$(whoami)" "${nomad_data_root}/redis"
 }
 
+repair_nomad_storage_permissions() {
+  refresh_nomad_data_root
+
+  sudo mkdir -p "${nomad_data_root}/storage/logs" "${nomad_data_root}/mysql" "${nomad_data_root}/redis"
+  sudo touch "${nomad_data_root}/storage/logs/admin.log"
+
+  sudo chown -R "$(whoami):$(whoami)" "${nomad_data_root}/storage"
+  sudo chmod -R u+rwX,go+rX "${nomad_data_root}/storage"
+
+  # MySQL runs as uid/gid 999 in the upstream mysql:8.0 image. Reused external
+  # data can easily keep the wrong owner after recovery-style installs.
+  sudo chown -R 999:999 "${nomad_data_root}/mysql"
+  sudo find "${nomad_data_root}/mysql" -type d -exec chmod 750 {} \;
+  sudo find "${nomad_data_root}/mysql" -type f -exec chmod 640 {} \;
+
+  # Redis also writes persistent state inside its data dir and benefits from
+  # being normalized during recovery imports.
+  sudo chown -R 999:999 "${nomad_data_root}/redis"
+  sudo find "${nomad_data_root}/redis" -type d -exec chmod 750 {} \;
+  sudo find "${nomad_data_root}/redis" -type f -exec chmod 640 {} \;
+
+  echo -e "${GREEN}#${RESET} Normalized permissions under ${WHITE_R}${nomad_data_root}${RESET} for storage, MySQL, and Redis."
+}
+
 load_or_generate_install_secrets() {
   refresh_nomad_data_root
 
@@ -1323,8 +1363,9 @@ select_external_device_interactively() {
 configure_local_storage() {
   use_external_storage='false'
   refresh_nomad_data_root
-  sudo mkdir -p "${NOMAD_DIR}/storage/logs" "${NOMAD_DIR}/mysql" "${NOMAD_DIR}/redis"
-  sudo touch "${NOMAD_DIR}/storage/logs/admin.log"
+  backup_and_reset_mysql_data_if_requested
+  backup_and_reset_redis_data_if_requested
+  repair_nomad_storage_permissions
   echo -e "${YELLOW}#${RESET} Project N.O.M.A.D will use local storage under ${WHITE_R}${NOMAD_DIR}${RESET}."
   echo -e "${YELLOW}#${RESET} This is simpler, but large ZIM collections and Ollama models will use TF/SD storage.\\n"
 }
@@ -1583,11 +1624,9 @@ configure_external_storage() {
 
   sudo mount "${external_mount}"
   refresh_nomad_data_root
-  sudo mkdir -p "${nomad_data_root}/storage/logs" "${nomad_data_root}/mysql" "${nomad_data_root}/redis"
-  sudo touch "${nomad_data_root}/storage/logs/admin.log"
-  sudo chown -R "$(whoami):$(whoami)" "${nomad_data_root}"
   backup_and_reset_mysql_data_if_requested
   backup_and_reset_redis_data_if_requested
+  repair_nomad_storage_permissions
 
   echo -e "${YELLOW}#${RESET} Installer note: Project N.O.M.A.D stores data on ${WHITE_R}${external_device}${RESET} but does not configure USB boot."
   echo -e "${YELLOW}#${RESET} If your Pi firmware ever prefers USB mass storage over the SD card, set Raspberry Pi boot order to prefer SD before USB."
