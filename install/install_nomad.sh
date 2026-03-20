@@ -90,6 +90,7 @@ swap_file_path=''
 swap_size_gib="${NOMAD_SWAP_SIZE_GIB:-16}"
 use_external_swap='auto'
 enable_ai_runtime='auto'
+ai_runtime_requested='auto'
 nomad_data_root=''
 source_repo_dir=''
 install_secrets_file=''
@@ -633,8 +634,10 @@ ensure_raspberry_pi_nvidia_prerequisites() {
       "Install AI Runtime" \
       "Skip AI Runtime"; then
       enable_ai_runtime='true'
+      ai_runtime_requested='true'
     else
       enable_ai_runtime='false'
+      ai_runtime_requested='false'
     fi
   fi
 
@@ -1327,7 +1330,7 @@ configure_local_storage() {
 }
 
 select_swap_device_interactively() {
-  if [[ "${enable_ai_runtime}" != 'true' ]]; then
+  if [[ "${ai_runtime_requested}" != 'true' && "${enable_ai_runtime}" != 'true' ]]; then
     use_external_swap='false'
     return 0
   fi
@@ -1416,7 +1419,7 @@ select_swap_device_interactively() {
 }
 
 configure_optional_swap_device() {
-  if [[ "${enable_ai_runtime}" != 'true' ]]; then
+  if [[ "${ai_runtime_requested}" != 'true' && "${enable_ai_runtime}" != 'true' ]]; then
     use_external_swap='false'
     echo -e "${YELLOW}#${RESET} AI runtime was not requested, so Project N.O.M.A.D will keep the current OS swap layout."
     return 0
