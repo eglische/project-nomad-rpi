@@ -14,4 +14,9 @@ export type ServiceSlim = Pick<
   | 'display_order'
   | 'container_image'
   | 'available_update_version'
-> & { status?: string }
+> & {
+  status?: string
+  status_detail?: string
+  status_technical_details?: string[]
+  status_error_summary?: string | null
+}

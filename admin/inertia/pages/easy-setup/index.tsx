@@ -110,7 +110,6 @@ type WizardStep = 1 | 2 | 3 | 4
 const CURATED_MAP_COLLECTIONS_KEY = 'curated-map-collections'
 const CURATED_CATEGORIES_KEY = 'curated-categories'
 const WIKIPEDIA_STATE_KEY = 'wikipedia-state'
-const NOMAD_STORAGE_MOUNT_HINTS = ['/mnt/nomad-data', '/storage']
 
 export default function EasySetupWizard(props: { system: { services: ServiceSlim[] } }) {
   const { aiAssistantName } = usePage<{ aiAssistantName: string }>().props
@@ -296,9 +295,9 @@ export default function EasySetupWizard(props: { system: { services: ServiceSlim
     wikipediaState,
   ])
 
-  // Get primary disk/filesystem info for storage projection.
-  // Prefer the disk backing Nomad's external storage mount when present.
-  // Fall back to the root disk, then the largest valid disk.
+  // Get primary disk/filesystem info for storage projection
+  // Try disk array first (Linux/production), fall back to fsSize (Windows/dev)
+  // Filter out invalid disks (totalSize === 0) and prefer disk with root mount or largest valid disk
   const getPrimaryDisk = () => {
     if (!systemInfo?.disk || systemInfo.disk.length === 0) return null
 
@@ -306,16 +305,10 @@ export default function EasySetupWizard(props: { system: { services: ServiceSlim
     const validDisks = systemInfo.disk.filter((d) => d.totalSize > 0)
     if (validDisks.length === 0) return null
 
-    const diskWithNomadStorage = validDisks.find((d) =>
-      d.filesystems?.some((fs) =>
-        NOMAD_STORAGE_MOUNT_HINTS.some(
-          (mountHint) => fs.mount === mountHint || fs.mount.startsWith(`${mountHint}/`)
-        )
-      )
+    // Prefer disk containing root mount (/) or /storage mount
+    const diskWithRoot = validDisks.find((d) =>
+      d.filesystems?.some((fs) => fs.mount === '/' || fs.mount === '/storage')
     )
-    if (diskWithNomadStorage) return diskWithNomadStorage
-
-    const diskWithRoot = validDisks.find((d) => d.filesystems?.some((fs) => fs.mount === '/'))
     if (diskWithRoot) return diskWithRoot
 
     // Fall back to largest valid disk

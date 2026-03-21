@@ -177,6 +177,13 @@ export class SystemService {
         display_order: service.display_order,
         container_image: service.container_image,
         available_update_version: service.available_update_version,
+        status_detail: status ? (await this.dockerService.getServiceRuntimeDetails(service.service_name)).detail : 'Container is missing.',
+        status_technical_details: status
+          ? (await this.dockerService.getServiceRuntimeDetails(service.service_name)).technicalDetails
+          : ['Container state: missing'],
+        status_error_summary: status
+          ? (await this.dockerService.getServiceRuntimeDetails(service.service_name)).errorSummary
+          : 'Container is missing',
       })
     }
 
@@ -286,8 +293,8 @@ export class SystemService {
               logger.warn(`NVIDIA runtime detected but GPU passthrough failed: ${typeof nvidiaInfo === 'string' ? nvidiaInfo : JSON.stringify(nvidiaInfo)}`)
             }
           }
-        } else {
-          // si.graphics() returned controllers (host install, not Docker) — GPU is working
+        } else if (this.hasConfirmedAcceleratorController(graphics.controllers)) {
+          // si.graphics() returned a non-embedded accelerator/controller
           gpuHealth.status = 'ok'
           gpuHealth.ollamaGpuAccessible = true
         }
@@ -310,6 +317,27 @@ export class SystemService {
       logger.error('Error getting system info:', error)
       return undefined
     }
+  }
+
+  private hasConfirmedAcceleratorController(
+    controllers: Array<{ vendor?: string; model?: string }>
+  ): boolean {
+    return controllers.some((controller) => {
+      const vendor = (controller.vendor || '').toLowerCase()
+      const model = (controller.model || '').toLowerCase()
+
+      if (!vendor && !model) {
+        return false
+      }
+
+      // Ignore the Pi's built-in VideoCore graphics when deciding whether Ollama GPU
+      // passthrough is actually available.
+      if (vendor.includes('broadcom') || model.includes('videocore')) {
+        return false
+      }
+
+      return true
+    })
   }
 
   async checkLatestVersion(force?: boolean): Promise<{

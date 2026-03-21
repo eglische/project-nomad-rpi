@@ -1240,11 +1240,22 @@ backup_and_reset_redis_data_if_requested() {
 repair_nomad_storage_permissions() {
   refresh_nomad_data_root
 
-  sudo mkdir -p "${nomad_data_root}/storage/logs" "${nomad_data_root}/mysql" "${nomad_data_root}/redis"
+  sudo mkdir -p \
+    "${nomad_data_root}/storage/logs" \
+    "${nomad_data_root}/storage/nodered" \
+    "${nomad_data_root}/mysql" \
+    "${nomad_data_root}/redis"
   sudo touch "${nomad_data_root}/storage/logs/admin.log"
 
   sudo chown -R "$(whoami):$(whoami)" "${nomad_data_root}/storage"
   sudo chmod -R u+rwX,go+rX "${nomad_data_root}/storage"
+
+  # Node-RED writes its initial settings into /data on first boot and runs as
+  # uid/gid 1000 in the upstream image. Without this, a root-owned recovered
+  # bind mount will make the container crash-loop with EACCES.
+  sudo chown -R 1000:1000 "${nomad_data_root}/storage/nodered"
+  sudo find "${nomad_data_root}/storage/nodered" -type d -exec chmod 775 {} \;
+  sudo find "${nomad_data_root}/storage/nodered" -type f -exec chmod 664 {} \;
 
   # MySQL runs as uid/gid 999 in the upstream mysql:8.0 image. Reused external
   # data can easily keep the wrong owner after recovery-style installs.
@@ -1258,7 +1269,7 @@ repair_nomad_storage_permissions() {
   sudo find "${nomad_data_root}/redis" -type d -exec chmod 750 {} \;
   sudo find "${nomad_data_root}/redis" -type f -exec chmod 640 {} \;
 
-  echo -e "${GREEN}#${RESET} Normalized permissions under ${WHITE_R}${nomad_data_root}${RESET} for storage, MySQL, and Redis."
+  echo -e "${GREEN}#${RESET} Normalized permissions under ${WHITE_R}${nomad_data_root}${RESET} for storage, Node-RED, Vikunja, MySQL, and Redis."
 }
 
 load_or_generate_install_secrets() {

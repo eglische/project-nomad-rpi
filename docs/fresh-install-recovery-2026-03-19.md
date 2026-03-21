@@ -90,6 +90,35 @@ For a recovery install on a host like this:
 4. it should rebuild the management layer around that preserved data
 5. it should not touch unrelated USB partitions unless explicitly chosen
 
+## 2026-03-20 validation addendum
+
+- The fresh-install flow was revalidated destructively on `192.168.1.14` after:
+  - wiping Nomad host state
+  - reformatting the external HDD
+  - reformatting the USB swap stick
+- The same fresh-install path was then run successfully again after a second wipe/reformat cycle
+
+What was specifically proven in those reruns:
+
+- external Nomad data storage on `/dev/sda1` works from a truly fresh state
+- supplemental USB swap on `/dev/sdb` works from a truly fresh state
+- existing CUDA/NVIDIA runtime reuse works and avoids unnecessary reinstall time
+- local source-based install no longer dies in the management image export/build phase after the installer was changed to:
+  - prebuild local images explicitly
+  - then use `docker compose up -d --no-build`
+
+Important remaining scope boundary after this validation:
+
+- the installer now correctly distinguishes:
+  - AI Assistant installation intent
+  - optional NVIDIA/CUDA acceleration intent
+- if no NVIDIA GPU is present, it can now explicitly offer CPU-only AI Assistant setup with a Pi-model limitation warning
+- however, the installer still does not auto-install the `AI Assistant` app itself after Nomad comes online
+- current behavior is:
+  - prepare runtime prerequisites
+  - bring up Nomad management
+  - leave `nomad_ollama` / `nomad_qdrant` uninstalled until the user installs AI Assistant from Nomad
+
 ## Post-install recovery UX requirement
 
 When preserved data exists but the Nomad metadata database has to be reset, the UI needs a second-stage recovery flow.

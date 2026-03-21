@@ -17,6 +17,12 @@ import { useTransmit } from 'react-adonis-transmit'
 import { BROADCAST_CHANNELS } from '../../../constants/broadcast'
 import { IconArrowUp, IconCheck, IconDownload } from '@tabler/icons-react'
 import UpdateServiceModal from '~/components/UpdateServiceModal'
+import { SERVICE_NAMES } from '../../../constants/service_names'
+
+const APP_ACCESS_HINTS: Partial<Record<string, string>> = {
+  [SERVICE_NAMES.OPENWEBRX]:
+    'Default login: admin / password. Change it after install.',
+}
 
 function extractTag(containerImage: string): string {
   if (!containerImage) return ''
@@ -143,6 +149,30 @@ export default function SettingsPage(props: { system: { services: ServiceSlim[] 
     } catch (error) {
       console.error(`Error affecting service ${record.service_name}:`, error)
       showError(`Failed to ${action} service: ${error.message || 'Unknown error'}`)
+    }
+  }
+
+  async function handleRepairService(record: ServiceSlim) {
+    try {
+      setLoading(true)
+      const response = await api.repairService(record.service_name)
+      if (!response) {
+        throw new Error('An internal error occurred while trying to repair the service.')
+      }
+      if (!response.success) {
+        throw new Error(response.message)
+      }
+
+      closeAllModals()
+
+      setTimeout(() => {
+        setLoading(false)
+        window.location.reload()
+      }, 3000)
+    } catch (error) {
+      console.error(`Error repairing service ${record.service_name}:`, error)
+      showError(`Failed to repair service: ${error.message || 'Unknown error'}`)
+      setLoading(false)
     }
   }
 
@@ -323,6 +353,16 @@ export default function SettingsPage(props: { system: { services: ServiceSlim[] 
                 Restart
               </StyledButton>
             )}
+            {record.status !== 'running' && (
+              <StyledButton
+                icon="IconTool"
+                variant="action"
+                onClick={() => handleRepairService(record)}
+                disabled={isInstalling}
+              >
+                Try Fix
+              </StyledButton>
+            )}
             <ForceReinstallButton />
           </>
         )}
@@ -365,6 +405,25 @@ export default function SettingsPage(props: { system: { services: ServiceSlim[] 
                       <div className="flex flex-col">
                         <p>{record.friendly_name || record.service_name}</p>
                         <p className="text-sm text-gray-500">{record.description}</p>
+                        {APP_ACCESS_HINTS[record.service_name] && (
+                          <p className="mt-1 text-xs text-desert-green">
+                            {APP_ACCESS_HINTS[record.service_name]}
+                          </p>
+                        )}
+                        {record.installed && record.status && record.status !== 'running' && (
+                          <div className="mt-2 rounded-md border border-desert-orange/30 bg-desert-orange-lighter/15 px-3 py-2 text-xs text-desert-green-darker whitespace-normal">
+                            <p className="font-semibold">
+                              {record.status_error_summary || record.status_detail || `Container is ${record.status}.`}
+                            </p>
+                            {record.status_technical_details && record.status_technical_details.length > 0 && (
+                              <div className="mt-1 space-y-1">
+                                {record.status_technical_details.slice(0, 3).map((detail) => (
+                                  <p key={detail}>{detail}</p>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )
                   },
@@ -372,15 +431,20 @@ export default function SettingsPage(props: { system: { services: ServiceSlim[] 
                 {
                   accessor: 'ui_location',
                   title: 'Location',
+                  className: '!whitespace-nowrap !truncate-none min-w-28',
                   render: (record) => (
-                    <a
-                      href={getServiceLink(record.ui_location || 'unknown')}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-desert-green hover:underline font-semibold"
-                    >
-                      {record.ui_location}
-                    </a>
+                    record.ui_location ? (
+                      <a
+                        href={getServiceLink(record.ui_location)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center whitespace-nowrap font-mono font-semibold text-desert-green hover:underline"
+                      >
+                        {record.ui_location}
+                      </a>
+                    ) : (
+                      <span className="text-gray-400">-</span>
+                    )
                   ),
                 },
                 {
@@ -427,4 +491,3 @@ export default function SettingsPage(props: { system: { services: ServiceSlim[] 
     </SettingsLayout>
   )
 }
-

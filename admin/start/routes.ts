@@ -29,7 +29,6 @@ router.get('/home', [HomeController, 'home'])
 router.on('/about').renderInertia('about')
 router.get('/chat', [ChatsController, 'inertia'])
 router.get('/maps', [MapsController, 'index'])
-router.get('/radio', [HomeController, 'radio'])
 router.on('/knowledge-base').redirectToPath('/chat?knowledge_base=true') // redirect for legacy knowledge-base links
 
 router.get('/easy-setup', [EasySetupController, 'index'])
@@ -106,8 +105,6 @@ router
     router.post('/models', [OllamaController, 'dispatchModelDownload'])
     router.delete('/models', [OllamaController, 'deleteModel'])
     router.get('/installed-models', [OllamaController, 'installedModels'])
-    router.get('/runtime-status', [OllamaController, 'runtimeStatus'])
-    router.post('/load-model', [OllamaController, 'loadModel'])
   })
   .prefix('/api/ollama')
 
@@ -139,9 +136,6 @@ router
 router
   .group(() => {
     router.get('/info', [SystemController, 'getSystemInfo'])
-    router.get('/activity', [SystemController, 'getActivity'])
-    router.get('/diagnostics', [SystemController, 'getDiagnostics'])
-    router.get('/recovery', [SystemController, 'getRecovery'])
     router.get('/internet-status', [SystemController, 'getInternetStatus'])
     router.get('/services', [SystemController, 'getServices'])
     router.post('/services/affect', [SystemController, 'affectService'])
@@ -150,12 +144,6 @@ router
     router.post('/services/check-updates', [SystemController, 'checkServiceUpdates'])
     router.get('/services/:name/available-versions', [SystemController, 'getAvailableVersions'])
     router.post('/services/update', [SystemController, 'updateService'])
-    router.post('/reconcile', [SystemController, 'reconcile'])
-    router.post('/resume-installed-services', [SystemController, 'resumeInstalledServices'])
-    router.post('/retry-failed-embedding-jobs', [SystemController, 'retryFailedEmbeddingJobs'])
-    router.post('/retry-failed-download-jobs', [SystemController, 'retryFailedDownloadJobs'])
-    router.post('/clear-failed-jobs', [SystemController, 'clearFailedJobs'])
-    router.post('/recovery/import', [SystemController, 'importRecovery'])
     router.post('/subscribe-release-notes', [SystemController, 'subscribeToReleaseNotes'])
     router.get('/latest-version', [SystemController, 'checkLatestVersion'])
     router.post('/update', [SystemController, 'requestSystemUpdate'])
@@ -170,8 +158,6 @@ router
   .group(() => {
     router.get('/list', [ZimController, 'list'])
     router.get('/list-remote', [ZimController, 'listRemote'])
-    router.get('/sources', [ZimController, 'listSources'])
-    router.get('/browse-directory', [ZimController, 'browseRemoteDirectory'])
     router.get('/curated-categories', [ZimController, 'listCuratedCategories'])
     router.post('/download-remote', [ZimController, 'downloadRemote'])
     router.post('/download-category-tier', [ZimController, 'downloadCategoryTier'])

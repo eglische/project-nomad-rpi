@@ -134,6 +134,16 @@ export default class SystemController {
         response.send({ success: result.success, message: result.message });
     }
 
+    async repairService({ request, response }: HttpContext) {
+        const payload = await request.validateUsing(installServiceValidator);
+        const result = await this.dockerService.repairService(payload.service_name);
+        if (!result) {
+            response.internalServerError({ error: 'Failed to repair service' });
+            return;
+        }
+        response.send({ success: result.success, message: result.message, details: result.details || [] });
+    }
+
     async checkLatestVersion({ request }: HttpContext) {
         const payload = await request.validateUsing(checkLatestVersionValidator)
         return await this.systemService.checkLatestVersion(payload.force);

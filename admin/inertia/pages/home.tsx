@@ -1,16 +1,12 @@
 import {
-  IconAntennaBars5,
   IconBolt,
   IconHelp,
   IconMapRoute,
   IconPlus,
-  IconRadio,
   IconSettings,
   IconWifiOff,
 } from '@tabler/icons-react'
-import { useEffect, useState } from 'react'
-import { Head } from '@inertiajs/react'
-import { useQuery } from '@tanstack/react-query'
+import { Head, usePage } from '@inertiajs/react'
 import AppLayout from '~/layouts/AppLayout'
 import { getServiceLink } from '~/lib/navigation'
 import { ServiceSlim } from '../../types/services'
@@ -19,10 +15,6 @@ import { useUpdateAvailable } from '~/hooks/useUpdateAvailable'
 import { useSystemSetting } from '~/hooks/useSystemSetting'
 import Alert from '~/components/Alert'
 import { SERVICE_NAMES } from '../../constants/service_names'
-import type { RecoveryScanResponse } from '../../types/system'
-import api from '~/lib/api'
-import RecoveryModal from '~/components/system/RecoveryModal'
-import { useNotifications } from '~/context/NotificationContext'
 
 // Maps is a Core Capability (display_order: 4)
 const MAPS_ITEM = {
@@ -33,24 +25,6 @@ const MAPS_ITEM = {
   icon: <IconMapRoute size={48} />,
   installed: true,
   displayOrder: 4,
-  poweredBy: null,
-}
-
-const RADIO_TILE_SERVICES = new Set([SERVICE_NAMES.RADIO, SERVICE_NAMES.OPENWEBRX])
-
-const RADIO_ITEM = {
-  label: 'Radio',
-  to: '/radio',
-  target: '',
-  description: 'Launch the radio receiver or spectrum analyzer for the RTL-SDR dongle',
-  icon: (
-    <div className="flex items-center gap-1">
-      <IconRadio size={32} />
-      <IconAntennaBars5 size={28} />
-    </div>
-  ),
-  installed: true,
-  displayOrder: 13,
   poweredBy: null,
 }
 
@@ -113,45 +87,25 @@ interface DashboardItem {
 export default function Home(props: {
   system: {
     services: ServiceSlim[]
-    recovery: RecoveryScanResponse
   }
 }) {
   const items: DashboardItem[] = []
   const updateInfo = useUpdateAvailable();
-  const { addNotification } = useNotifications()
-  const [recoveryModalOpen, setRecoveryModalOpen] = useState(false)
-  const [recoveryLoading, setRecoveryLoading] = useState(false)
-  const { data: recovery, refetch: refetchRecovery } = useQuery({
-    queryKey: ['system-recovery-home'],
-    queryFn: () => api.getSystemRecovery(),
-    initialData: props.system.recovery,
-    refetchInterval: 30000,
-  })
+  const { aiAssistantName } = usePage<{ aiAssistantName: string }>().props
 
   // Check if user has visited Easy Setup
   const { data: easySetupVisited } = useSystemSetting({
     key: 'ui.hasVisitedEasySetup'
   })
   const shouldHighlightEasySetup = easySetupVisited?.value ? easySetupVisited?.value !== 'true' : false
-  const hasRecoverableServices = Boolean(recovery?.hasRecoverableServices)
-
-  useEffect(() => {
-    if (hasRecoverableServices) {
-      setRecoveryModalOpen(true)
-    }
-  }, [hasRecoverableServices])
 
   // Add installed services (non-dependency services only)
-  const hasInstalledRadioTool = props.system.services.some(
-    (service) => service.installed && RADIO_TILE_SERVICES.has(service.service_name)
-  )
-
   props.system.services
     .filter((service) => service.installed && service.ui_location)
-    .filter((service) => !RADIO_TILE_SERVICES.has(service.service_name))
     .forEach((service) => {
       items.push({
-        label: service.friendly_name || service.service_name,
+        // Inject custom AI Assistant name if this is the chat service
+        label: service.service_name === SERVICE_NAMES.OLLAMA && aiAssistantName ? aiAssistantName : (service.friendly_name || service.service_name),
         to: service.ui_location ? getServiceLink(service.ui_location) : '#',
         target: '_blank',
         description:
@@ -168,10 +122,6 @@ export default function Home(props: {
       })
     })
 
-  if (hasInstalledRadioTool) {
-    items.push(RADIO_ITEM)
-  }
-
   // Add Maps as a Core Capability
   items.push(MAPS_ITEM)
 
@@ -184,43 +134,6 @@ export default function Home(props: {
   return (
     <AppLayout>
       <Head title="Command Center" />
-      <RecoveryModal
-        open={recoveryModalOpen}
-        recovery={recovery}
-        loading={recoveryLoading}
-        onClose={() => setRecoveryModalOpen(false)}
-        onConfirm={async (serviceNames) => {
-          if (serviceNames.length === 0) {
-            setRecoveryModalOpen(false)
-            return
-          }
-
-          setRecoveryLoading(true)
-          try {
-            const response = await api.importRecoveredServices(serviceNames)
-            if (!response?.success) {
-              throw new Error(response?.message || 'Recovery import failed')
-            }
-
-            addNotification({
-              message:
-                response.actions.length > 0
-                  ? `${response.message} ${response.actions.join(' • ')}`
-                  : response.message,
-              type: 'success',
-            })
-            setRecoveryModalOpen(false)
-            await refetchRecovery()
-          } catch (error) {
-            addNotification({
-              message: error instanceof Error ? error.message : 'Recovery import failed',
-              type: 'error',
-            })
-          } finally {
-            setRecoveryLoading(false)
-          }
-        }}
-      />
       {
         updateInfo?.updateAvailable && (
           <div className='flex justify-center items-center p-4 w-full'>
@@ -241,23 +154,6 @@ export default function Home(props: {
           </div>
         )
       }
-      {hasRecoverableServices && (
-        <div className="flex justify-center items-center px-4 pb-0 w-full">
-          <Alert
-            title="Previous Project N.O.M.A.D. data found"
-            message="Nomad found preserved app data on your external storage. Use recovery to reconnect the services without wiping the drive."
-            type="warning"
-            variant="bordered"
-            className="w-full"
-            buttonProps={{
-              variant: 'primary',
-              children: 'Open Recovery',
-              icon: 'IconDatabaseImport',
-              onClick: () => setRecoveryModalOpen(true),
-            }}
-          />
-        </div>
-      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 p-4">
         {items.map((item) => {
           const isEasySetup = item.label === 'Easy Setup'

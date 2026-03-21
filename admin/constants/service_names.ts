@@ -5,6 +5,9 @@ export const SERVICE_NAMES = {
   CYBERCHEF: 'nomad_cyberchef',
   FLATNOTES: 'nomad_flatnotes',
   KOLIBRI: 'nomad_kolibri',
+  MAPSTORE: 'nomad_mapstore',
   RADIO: 'nomad_radio',
   OPENWEBRX: 'nomad_openwebrx',
+  NODERED: 'nomad_nodered',
+  MOSQUITTO: 'nomad_mosquitto',
 }

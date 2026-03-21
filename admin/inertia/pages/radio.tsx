@@ -121,7 +121,7 @@ export default function RadioPage(props: { system: { services: ServiceSlim[] } }
             variant="soft"
             className="mb-8"
           >
-            Radio/DAB+ and Spectrum Analyzer cannot use the same RTL-SDR at the same time.
+            Radio/DAB+ and the FM/AM Radio Receiver Interface cannot use the same RTL-SDR at the same time.
             Project N.O.M.A.D. will hand the device over automatically when you launch one.
           </Alert>
 
@@ -182,14 +182,14 @@ export default function RadioPage(props: { system: { services: ServiceSlim[] } }
               <div className="mb-4 flex items-center gap-3">
                 <IconAntennaBars5 className="text-desert-green" size={26} />
                 <div>
-                  <h2 className="text-xl font-semibold text-desert-night">Open Spectrum Analyzer</h2>
+                  <h2 className="text-xl font-semibold text-desert-night">Open FM/AM Radio Receiver Interface</h2>
                   <p className="text-sm text-desert-stone-dark">
-                    OpenWebRX+ raw SDR receiver and signal analysis frontend.
+                    OpenWebRX+ receiver interface for FM, AM, airband, and analog signal listening.
                   </p>
                 </div>
               </div>
               <p className="mb-6 text-sm text-desert-stone-dark">
-                Best for spectrum browsing, signal hunting, and later decoder-oriented workflows.
+                Best for analog radio listening, signal browsing, and later decoder-oriented workflows.
               </p>
               <StyledButton
                 variant="primary"
@@ -201,19 +201,19 @@ export default function RadioPage(props: { system: { services: ServiceSlim[] } }
               >
                 {loadingTarget === SERVICE_NAMES.OPENWEBRX
                   ? launchPhase === 'installing'
-                    ? 'Installing Spectrum Analyzer...'
+                    ? 'Installing FM/AM Radio Receiver Interface...'
                     : launchPhase === 'waiting'
-                      ? 'Waiting For Spectrum Analyzer...'
-                      : 'Launching Spectrum Analyzer...'
-                  : 'Open Spectrum Analyzer'}
+                      ? 'Waiting For FM/AM Radio Receiver Interface...'
+                      : 'Launching FM/AM Radio Receiver Interface...'
+                  : 'Open FM/AM Radio Receiver Interface'}
               </StyledButton>
               {loadingTarget === SERVICE_NAMES.OPENWEBRX && (
                 <p className="mt-3 flex items-center gap-2 text-sm text-desert-stone-dark">
                   <IconLoader2 className="animate-spin" size={16} />
                   {launchPhase === 'installing'
-                    ? 'Building and installing the Spectrum Analyzer service. This may take a few minutes on first install.'
+                    ? 'Building and installing the FM/AM Radio Receiver Interface service. This may take a few minutes on first install.'
                     : launchPhase === 'waiting'
-                      ? 'Spectrum Analyzer is starting up now. Project N.O.M.A.D will redirect once it is ready.'
+                      ? 'FM/AM Radio Receiver Interface is starting up now. Project N.O.M.A.D will redirect once it is ready.'
                       : 'Stopping the radio receiver if needed, then preparing OpenWebRX+.'}
                 </p>
               )}

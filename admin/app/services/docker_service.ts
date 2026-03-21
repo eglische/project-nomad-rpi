@@ -31,6 +31,12 @@ type LocalServiceBuildTarget = {
 }
 
 const LOCAL_SERVICE_BUILD_TARGETS: Record<string, LocalServiceBuildTarget> = {
+  [SERVICE_NAMES.MAPSTORE]: {
+    image: 'project-nomad-local/mapstore2:latest',
+    contextPath: join(process.cwd(), 'resources', 'service-builds', 'mapstore'),
+    dockerfile: 'Dockerfile',
+    src: ['Dockerfile', 'server.xml', 'wait-for-postgres.sh'],
+  },
   [SERVICE_NAMES.RADIO]: {
     image: 'project-nomad-local/radio:latest',
     contextPath: join(process.cwd(), 'resources', 'service-builds', 'radio'),
@@ -136,6 +142,30 @@ export class DockerService {
     }
   }
 
+  async repairService(
+    serviceName: string
+  ): Promise<{ success: boolean; message: string; details?: string[] }> {
+    const service = await Service.query().where('service_name', serviceName).first()
+    if (!service) {
+      return { success: false, message: `Service ${serviceName} not found` }
+    }
+
+    const repaired: string[] = []
+    const containerConfig = this._parseContainerConfig(service.container_config)
+    await this._repairServiceBindPermissions(service, containerConfig, repaired)
+
+    const action = await this.affectContainer(serviceName, 'restart')
+    return {
+      success: action.success,
+      message: action.success
+        ? repaired.length > 0
+          ? `${action.message}. Repaired storage permissions first.`
+          : action.message
+        : action.message,
+      details: repaired,
+    }
+  }
+
   /**
    * Fetches the status of all Docker containers related to Nomad services. (those prefixed with 'nomad_')
    */
@@ -162,6 +192,73 @@ export class DockerService {
     } catch (error) {
       logger.error(`Error fetching services status: ${error.message}`)
       return []
+    }
+  }
+
+  async getServiceRuntimeDetails(serviceName: string): Promise<{
+    state: string
+    detail: string
+    technicalDetails: string[]
+    errorSummary: string | null
+  }> {
+    try {
+      const containers = await this.docker.listContainers({ all: true })
+      const containerInfo = containers.find((entry) => entry.Names.includes(`/${serviceName}`))
+
+      if (!containerInfo) {
+        return {
+          state: 'missing',
+          detail: 'Container is missing.',
+          technicalDetails: ['Container state: missing'],
+          errorSummary: 'Container is missing',
+        }
+      }
+
+      const container = this.docker.getContainer(containerInfo.Id)
+      const inspectData = await container.inspect()
+      const healthStatus = inspectData.State?.Health?.Status
+      const restartCount = inspectData.RestartCount ?? 0
+      const logs = await container.logs({ stdout: true, stderr: true, tail: 40 })
+      const logLines = logs
+        .toString('utf8')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+      const recentInteresting = [...logLines]
+        .reverse()
+        .find((line) =>
+          /(error|exception|eacces|permission denied|failed|unable|exited|crash)/i.test(line)
+        ) || null
+
+      const technicalDetails = [
+        `Container state: ${containerInfo.State}`,
+        ...(healthStatus ? [`Health: ${healthStatus}`] : []),
+        ...(restartCount > 0 ? [`Restart count: ${restartCount}`] : []),
+        ...(recentInteresting ? [`Recent error: ${recentInteresting}`] : []),
+      ]
+
+      const detail =
+        containerInfo.State === 'running'
+          ? healthStatus && healthStatus !== 'healthy'
+            ? `Running, but health is ${healthStatus}.`
+            : 'Running normally.'
+          : recentInteresting
+            ? recentInteresting
+            : `Container is ${containerInfo.State}.`
+
+      return {
+        state: containerInfo.State || 'unknown',
+        detail,
+        technicalDetails,
+        errorSummary: recentInteresting,
+      }
+    } catch (error) {
+      return {
+        state: 'unknown',
+        detail: 'Failed to inspect runtime state.',
+        technicalDetails: [error instanceof Error ? error.message : String(error)],
+        errorSummary: error instanceof Error ? error.message : String(error),
+      }
     }
   }
 
@@ -512,6 +609,8 @@ export class DockerService {
           'Prepared OpenWebRX defaults and standard receiver profiles.'
         )
       }
+
+      await this._repairServiceBindPermissions(service, containerConfig)
 
       await this._ensureExclusiveSdrAccess(service.service_name, true)
 
@@ -896,6 +995,53 @@ export class DockerService {
     })
 
     await writeFile(settingsPath, `${JSON.stringify(settings, null, 4)}\n`, 'utf-8')
+  }
+
+  private async _repairServiceBindPermissions(
+    service: Service,
+    containerConfig: any,
+    repaired: string[] = []
+  ): Promise<void> {
+    const binds: string[] = containerConfig?.HostConfig?.Binds || []
+    if (!Array.isArray(binds) || binds.length === 0) {
+      return
+    }
+
+    const ownership = this._getServiceOwnership(service.service_name)
+    for (const bind of binds) {
+      const hostPath = bind.split(':')[0]
+      if (!hostPath || !hostPath.startsWith('/')) {
+        continue
+      }
+
+      await mkdir(hostPath, { recursive: true })
+
+      if (!ownership) {
+        continue
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        exec(`chown -R ${ownership.uid}:${ownership.gid} "${hostPath}"`, (error) => {
+          if (error) {
+            reject(error)
+            return
+          }
+          resolve()
+        })
+      })
+
+      repaired.push(`${service.service_name}: repaired ownership on ${hostPath}`)
+    }
+  }
+
+  private _getServiceOwnership(
+    serviceName: string
+  ): { uid: number; gid: number } | null {
+    const ownershipMap: Record<string, { uid: number; gid: number }> = {
+      [SERVICE_NAMES.NODERED]: { uid: 1000, gid: 1000 },
+    }
+
+    return ownershipMap[serviceName] ?? null
   }
 
   private async _cleanupFailedInstallation(serviceName: string): Promise<void> {
